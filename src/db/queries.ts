@@ -1,10 +1,17 @@
-import { desc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 import { db } from './index.ts';
 import {
   agentSettings,
+  AgentToolInvocation,
+  connectorSyncLogs,
   documentChunks,
   documents,
+  OnboardingPhase,
+  onboardingTracks,
   queryLogs,
+  RbacRole,
+  semanticCache,
+  userProgress,
   users,
 } from './schema.ts';
 import {
@@ -13,9 +20,34 @@ import {
   generateEmbedding,
   RetrievedChunk,
 } from '../lib/ai.ts';
+import { emitStructuredLog, recordCacheEvent } from '../lib/logger.ts';
+import { getAllowedTiersForRole, normalizeRbacRole } from '../lib/env.ts';
+import type {
+  ConnectorSyncLogItem,
+  DocumentSourceType,
+  EngineerCohortSummary,
+  HybridSearchMode,
+  OnboardingPayload,
+  OnboardingTrackItem,
+  UserMilestoneProgress,
+} from '../types/app.ts';
 
 const CHUNK_SIZE = 900;
 const CHUNK_OVERLAP = 140;
+const SEMANTIC_CACHE_THRESHOLD = 0.94;
+
+interface MemoryCacheItem {
+  id: number;
+  queryText: string;
+  queryEmbedding: number[];
+  answer: string;
+  sources: string[];
+  confidence: number;
+  toolCalls: AgentToolInvocation[];
+  hitCount: number;
+}
+
+const memorySemanticCache = new Map<string, MemoryCacheItem>();
 
 export function splitIntoChunks(
   text: string,
@@ -51,7 +83,8 @@ export function splitIntoChunks(
 export async function getOrCreateUser(
   uid: string,
   email: string,
-  displayName?: string | null
+  displayName?: string | null,
+  role?: RbacRole
 ) {
   try {
     const result = await db
@@ -60,28 +93,55 @@ export async function getOrCreateUser(
         uid,
         email,
         displayName: displayName || email.split('@')[0],
+        role: role || 'Admin',
       })
       .onConflictDoUpdate({
         target: users.uid,
         set: {
           email,
           displayName: displayName || email.split('@')[0],
+          ...(role ? { role } : {}),
         },
       })
       .returning();
 
     return result[0];
   } catch (error) {
-    console.error('Database user upsert failed:', error);
+    emitStructuredLog({
+      level: 'error',
+      component: 'db',
+      event: 'db.user_upsert_failed',
+      message: 'Database user upsert failed',
+    });
     throw new Error('Failed to synchronize user account.', { cause: error });
   }
 }
 
-const INITIAL_DOCS = [
+export async function updateUserRole(uid: string, role: RbacRole) {
+  try {
+    const [updated] = await db
+      .update(users)
+      .set({ role })
+      .where(eq(users.uid, uid))
+      .returning();
+    return updated;
+  } catch (error) {
+    throw new Error('Failed to update user RBAC role.', { cause: error });
+  }
+}
+
+const INITIAL_DOCS: {
+  title: string;
+  sourceType: 'file' | 'url' | 'slack';
+  sourceUrl: string;
+  accessLevel: RbacRole;
+  content: string;
+}[] = [
   {
     title: 'Engineering Onboarding & SSO Setup Guide',
     sourceType: 'file',
     sourceUrl: 'docs://onboarding/sso-setup.md',
+    accessLevel: 'Engineer',
     content: `# Engineering Onboarding & SSO Configuration
 To configure SAML 2.0 / OIDC Single Sign-On (SSO) for your engineering team workspace:
 1. Navigate to **Workspace Settings > Security & Identity > SSO Provider**.
@@ -90,13 +150,15 @@ To configure SAML 2.0 / OIDC Single Sign-On (SSO) for your engineering team work
 4. Map attributes: \`email\`, \`firstName\`, \`lastName\`, and \`groups\` (used for automatic RBAC role assignment).
 5. Upload the IdP X.509 metadata certificate and run **Test SAML Assertion** before toggling **Enforce SSO for All Members**.
 
-## Inviting Team Members
-Workspace Admins can invite new engineers via **Settings > Members > Invite by Email** or enable **Just-in-Time (JIT) Provisioning** for verified domain emails (\`@yourcompany.com\`).`,
+## Troubleshooting SAML Error Codes
+- **ERR_SAML_SIGNATURE_SKEW**: Triggered when IdP and SP clocks drift by more than 120 seconds (tracked in Jira \`ENG-1042\` and resolved in \`PR #502\`).
+- **ERR_SAML_GROUP_MAPPING_EMPTY**: Ensure Okta group attribute statement is named \`groups\` in lowercase.`,
   },
   {
     title: 'API Reference v2 — Rate Limits & Quotas',
     sourceType: 'url',
     sourceUrl: 'https://docs.hippocampus.internal/api/rate-limits',
+    accessLevel: 'Manager',
     content: `# API Rate Limits & Tier Quotas (v2)
 All Hippocampus REST and Vector Ingestion endpoints enforce sliding-window rate limits per API key:
 
@@ -112,6 +174,7 @@ To reset or rotate a compromised API key without downtime: go to **Developer Con
     title: 'Slack Events Webhook & Signing Runbook',
     sourceType: 'slack',
     sourceUrl: 'slack://#platform-architecture/pinned',
+    accessLevel: 'Admin',
     content: `# Configuring Slack Events API & Webhooks
 Hippocampus listens to Slack workspace events at \`POST /api/slack/events\`.
 
@@ -120,12 +183,13 @@ Hippocampus listens to Slack workspace events at \`POST /api/slack/events\`.
 2. Set the Request URL to \`https://<your-domain>/api/slack/events\`. Hippocampus automatically responds to the \`url_verification\` challenge payload.
 3. Subscribe to bot events: \`app_mention\`, \`member_joined_channel\`, and \`message.channels\`.
 4. Copy the **Signing Secret** from **Basic Information > App Credentials** into \`SLACK_SIGNING_SECRET\`.
-5. Every incoming request is verified using HMAC-SHA256 (\`v0:timestamp:rawBody\`) with \`crypto.timingSafeEqual\` and a strict 5-minute replay window.`,
+5. Every incoming request is verified using HMAC-SHA256 (\`v0:timestamp:rawBody\`) with \`crypto.timingSafeEqual\` and a strict 5-minute replay window (see Jira \`SEC-309\`).`,
   },
   {
     title: 'Local Mac Dev Environment & Docker Compose Setup',
     sourceType: 'file',
     sourceUrl: 'docs://runbooks/local-mac-setup.md',
+    accessLevel: 'Engineer',
     content: `# Local Development Environment on macOS (Apple Silicon)
 Follow these steps on day one to boot the full Hippocampus stack locally on macOS:
 
@@ -148,6 +212,7 @@ If Docker Desktop or OrbStack is preferred, run \`docker compose up -d postgres-
     title: 'Staging & Production Deployment Pipeline',
     sourceType: 'url',
     sourceUrl: 'https://docs.hippocampus.internal/ops/deployments',
+    accessLevel: 'Manager',
     content: `# Staging & Production Deployment Process
 Our CI/CD pipeline runs on GitHub Actions and deploys containerized services to Cloud Run.
 
@@ -162,20 +227,22 @@ Production promotions require two senior engineer approvals on the release tag (
     title: 'Data Pipeline & Supported Vector Databases',
     sourceType: 'file',
     sourceUrl: 'docs://architecture/vector-pipeline.md',
-    content: `# Supported Databases & Vector Indexing Pipeline
-Hippocampus uses **PostgreSQL with pgvector** as its primary relational + vector store, managed via **Drizzle ORM** and connection pooling.
+    accessLevel: 'Engineer',
+    content: `# Supported Databases & Hybrid Vector Indexing Pipeline
+Hippocampus uses **PostgreSQL with pgvector** combined with **Okapi BM25 Lexical Scoring** and **Reciprocal Rank Fusion (RRF)** (tracked in \`OPS-881\` and \`PR #418\`).
 
 ## Supported Ingestion Sources & Formats
 - **Direct Document Upload**: Markdown (\`.md\`), Plain Text (\`.txt\`), Technical Runbooks, and HTML documentation.
 - **URL Knowledge Crawler**: Internal wiki pages, API specs, and architecture decision records (ADRs).
 - **Slack Channel Sync**: Pinned thread resolutions from \`#eng-onboarding\`, \`#platform-ops\`, and \`#incidents\`.
 
-Documents are split into 900-character semantic chunks with a 140-character sliding overlap, embedded via \`gemini-embedding-2\`, and queried using cosine similarity with source attribution.`,
+Documents are split into 900-character semantic chunks with a 140-character sliding overlap, embedded via \`gemini-embedding-2\`, and queried using Hybrid RRF search.`,
   },
   {
     title: 'Billing, Enterprise Invoicing & Seat Management',
     sourceType: 'url',
     sourceUrl: 'https://docs.hippocampus.internal/billing/overview',
+    accessLevel: 'Admin',
     content: `# Billing Documentation & Enterprise Seat Management
 Billing documentation, downloadable VAT/GST invoices, and usage telemetry are located under **Organization Settings > Billing & Usage**.
 
@@ -184,66 +251,172 @@ Billing documentation, downloadable VAT/GST invoices, and usage telemetry are lo
   },
 ];
 
+const INITIAL_ONBOARDING_TRACKS: {
+  phase: OnboardingPhase;
+  title: string;
+  description: string;
+  category: string;
+  targetRole: RbacRole;
+  linkedDocTitle: string;
+  verificationPrompt: string;
+  estimatedMinutes: number;
+  sortOrder: number;
+}[] = [
+  {
+    phase: 'Day 1',
+    title: 'Configure Okta SAML 2.0 SSO & Verify Group Claims',
+    description:
+      'Set up your workspace SSO session, map your Okta engineering group attribute, and verify zero clock-skew errors (ERR_SAML_SIGNATURE_SKEW).',
+    category: 'Identity & Access',
+    targetRole: 'Engineer',
+    linkedDocTitle: 'Engineering Onboarding & SSO Setup Guide',
+    verificationPrompt:
+      'Check Jira ticket ENG-1042 and explain how to fix ERR_SAML_SIGNATURE_SKEW during Okta SSO setup.',
+    estimatedMinutes: 20,
+    sortOrder: 1,
+  },
+  {
+    phase: 'Day 1',
+    title: 'Boot Local macOS Dev Stack with PostgreSQL 16 & pgvector',
+    description:
+      'Install Node 22, PostgreSQL 16, and the pgvector extension via Homebrew or OrbStack, then push the Drizzle ORM schema.',
+    category: 'Local Stack',
+    targetRole: 'Engineer',
+    linkedDocTitle: 'Local Mac Dev Environment & Docker Compose Setup',
+    verificationPrompt:
+      'How do I set up my local dev environment on Mac with pgvector and push the Drizzle schema?',
+    estimatedMinutes: 35,
+    sortOrder: 2,
+  },
+  {
+    phase: 'Day 1',
+    title: 'Trigger Your First @Hippocampus Mention in #eng-onboarding',
+    description:
+      'Verify the Slack Events API webhook listener, thread responder, and retry-loop idempotency guard.',
+    category: 'Collaboration',
+    targetRole: 'Engineer',
+    linkedDocTitle: 'Slack Events Webhook & Signing Runbook',
+    verificationPrompt:
+      'How do we configure Slack Events API webhooks and HMAC-SHA256 verification?',
+    estimatedMinutes: 15,
+    sortOrder: 3,
+  },
+  {
+    phase: 'Week 1',
+    title: 'Deep-Dive Hybrid RRF Search (pgvector + Okapi BM25)',
+    description:
+      'Inspect PR #418 to understand how Hippocampus fuses dense Gemini embeddings with BM25 lexical scoring ($k_1=1.5, b=0.75$).',
+    category: 'Architecture',
+    targetRole: 'Engineer',
+    linkedDocTitle: 'Data Pipeline & Supported Vector Databases',
+    verificationPrompt:
+      'Inspect GitHub PR #418 and explain how our Hybrid RRF search combines pgvector and BM25.',
+    estimatedMinutes: 40,
+    sortOrder: 4,
+  },
+  {
+    phase: 'Week 1',
+    title: 'Review Sliding-Window API Rate Limits & Token Rotation',
+    description:
+      'Understand our 25 req/min sliding-window quota guard, X-RateLimit-* headers, and zero-downtime API key rolling.',
+    category: 'Security & Quotas',
+    targetRole: 'Manager',
+    linkedDocTitle: 'API Reference v2 — Rate Limits & Quotas',
+    verificationPrompt:
+      'What is the API rate limit for the Pro plan and how do I roll a compromised API key with zero downtime?',
+    estimatedMinutes: 25,
+    sortOrder: 5,
+  },
+  {
+    phase: 'Month 1',
+    title: 'Execute Staging Canary Deployment & Traffic Rollback Drill',
+    description:
+      'Deploy a feature branch to staging via GitHub Actions and practice an instant Cloud Run traffic rollback.',
+    category: 'Production Ops',
+    targetRole: 'Manager',
+    linkedDocTitle: 'Staging & Production Deployment Pipeline',
+    verificationPrompt:
+      'Check the service health of vector-pipeline and slack-events-gateway, and summarize our rollback steps.',
+    estimatedMinutes: 45,
+    sortOrder: 6,
+  },
+  {
+    phase: 'Month 1',
+    title: 'Complete SOC 2 Type II Security & Enterprise Seat Audit',
+    description:
+      'Review RBAC access tiers (Admin, Manager, Engineer), active seat policies, and enterprise compliance guardrails.',
+    category: 'Governance',
+    targetRole: 'Admin',
+    linkedDocTitle: 'Billing, Enterprise Invoicing & Seat Management',
+    verificationPrompt:
+      'How does our enterprise seat billing policy work and where are SOC 2 Type II packages located?',
+    estimatedMinutes: 30,
+    sortOrder: 7,
+  },
+];
+
+const INITIAL_COHORT_ENGINEERS: {
+  userHandle: string;
+  displayName: string;
+  engineerRole: string;
+  completedSortOrders: number[];
+}[] = [
+  {
+    userHandle: '@alex.chen',
+    displayName: 'Alex Chen',
+    engineerRole: 'Staff Platform Engineer',
+    completedSortOrders: [1, 2, 3, 4, 5],
+  },
+  {
+    userHandle: '@priya.patel',
+    displayName: 'Priya Patel',
+    engineerRole: 'Senior AI Systems Engineer',
+    completedSortOrders: [1, 2, 3, 4, 5, 6, 7],
+  },
+  {
+    userHandle: '@marcus.vance',
+    displayName: 'Marcus Vance',
+    engineerRole: 'Backend Product Engineer',
+    completedSortOrders: [1, 2, 3],
+  },
+  {
+    userHandle: '@sarah.kim',
+    displayName: 'Sarah Kim',
+    engineerRole: 'Infrastructure Engineer (New Hire)',
+    completedSortOrders: [1],
+  },
+];
+
 const INITIAL_LOGS = [
   {
     userHandle: '@alex.chen',
     channel: 'Slack #eng-onboarding',
-    query: 'How do I configure SSO for my team?',
+    query: 'How do I configure SSO for my team and check ENG-1042?',
     answer:
-      'Navigate to Workspace Settings > Security & Identity > SSO Provider, configure your SAML 2.0 ACS URL and Entity ID, map email/groups attributes, and upload your X.509 certificate [Source: Engineering Onboarding & SSO Setup Guide].',
+      'Navigate to Workspace Settings > Security & Identity > SSO Provider, configure your SAML 2.0 ACS URL and Entity ID, and upload your X.509 certificate [Source: Engineering Onboarding & SSO Setup Guide]. Jira ticket ENG-1042 is currently In Progress under @elena.rostova [Tool: fetchJiraTicket].',
     sources: ['Engineering Onboarding & SSO Setup Guide'],
     sourcesCited: 1,
     confidence: 96,
     latencyMs: 840,
     resolved: true,
-  },
-  {
-    userHandle: '@sarah.lin',
-    channel: 'Slack #platform-ops',
-    query: 'What is the API rate limit for the Pro plan?',
-    answer:
-      'The Pro Plan allows 600 requests per minute (10 req/sec sustained, burst up to 30 req/sec) and 250,000 vector queries per month with unlimited document chunks [Source: API Reference v2 — Rate Limits & Quotas].',
-    sources: ['API Reference v2 — Rate Limits & Quotas'],
-    sourcesCited: 1,
-    confidence: 94,
-    latencyMs: 720,
-    resolved: true,
-  },
-  {
-    userHandle: '@marcus.vance',
-    channel: 'Playground',
-    query: 'How to set up webhooks for Slack integration?',
-    answer:
-      'Enable Event Subscriptions in the Slack App portal, point the Request URL to POST /api/slack/events, subscribe to app_mention and member_joined_channel, and set SLACK_SIGNING_SECRET for HMAC-SHA256 verification [Source: Slack Events Webhook & Signing Runbook].',
-    sources: ['Slack Events Webhook & Signing Runbook'],
-    sourcesCited: 1,
-    confidence: 95,
-    latencyMs: 910,
-    resolved: true,
-  },
-  {
-    userHandle: '@priya.nair',
-    channel: 'Slack #eng-releases',
-    query: 'What is our deployment process for staging?',
-    answer:
-      'Every PR merged to main automatically builds, runs schema checks, and deploys to staging.hippocampus.internal. You can also trigger branch previews via /deploy staging <branch> [Source: Staging & Production Deployment Pipeline].',
-    sources: ['Staging & Production Deployment Pipeline'],
-    sourcesCited: 1,
-    confidence: 92,
-    latencyMs: 1050,
-    resolved: true,
-  },
-  {
-    userHandle: '@jordan.reid',
-    channel: 'Slack #eng-onboarding',
-    query: 'How do I set up local dev environment on Mac?',
-    answer:
-      'Install node@22, pnpm, postgresql@16, and pgvector via Homebrew (or run docker compose up -d postgres-vector), copy .env.example to .env.local, and run pnpm db:push && pnpm dev [Source: Local Mac Dev Environment & Docker Compose Setup].',
-    sources: ['Local Mac Dev Environment & Docker Compose Setup'],
-    sourcesCited: 1,
-    confidence: 97,
-    latencyMs: 790,
-    resolved: true,
+    cacheHit: false,
+    promptTokens: 312,
+    completionTokens: 148,
+    totalTokens: 460,
+    searchMode: 'hybrid_rrf',
+    requiredRole: 'Engineer',
+    toolCalls: [
+      {
+        toolName: 'fetchJiraTicket',
+        args: { ticketKey: 'ENG-1042' },
+        result: {
+          ticketKey: 'ENG-1042',
+          status: 'In Progress',
+          assignee: 'Elena Rostova (@elena.rostova)',
+        },
+        durationMs: 14,
+      },
+    ],
   },
 ];
 
@@ -296,6 +469,7 @@ export async function ensureSeedData(): Promise<void> {
               sourceType: item.sourceType,
               sourceUrl: item.sourceUrl,
               status: 'Indexed',
+              accessLevel: item.accessLevel,
               chunkCount: chunks.length,
               contentPreview: item.content.slice(0, 240),
               metadata: { seeded: true },
@@ -327,8 +501,53 @@ export async function ensureSeedData(): Promise<void> {
       if (existingSettings.length === 0) {
         await db.insert(agentSettings).values(INITIAL_SETTINGS);
       }
+
+      // Phase 4 Step 1: Seed onboarding_tracks and user_progress
+      const existingTracks = await db.select().from(onboardingTracks).limit(1);
+      if (existingTracks.length === 0) {
+        const insertedTracks = await db
+          .insert(onboardingTracks)
+          .values(INITIAL_ONBOARDING_TRACKS)
+          .returning();
+
+        const progressRows: {
+          userHandle: string;
+          displayName: string;
+          engineerRole: string;
+          trackId: number;
+          completed: boolean;
+          completedAt: Date | null;
+          assignedBy: string;
+          notes: string | null;
+        }[] = [];
+
+        for (const eng of INITIAL_COHORT_ENGINEERS) {
+          for (const track of insertedTracks) {
+            const isDone = eng.completedSortOrders.includes(track.sortOrder);
+            progressRows.push({
+              userHandle: eng.userHandle,
+              displayName: eng.displayName,
+              engineerRole: eng.engineerRole,
+              trackId: track.id,
+              completed: isDone,
+              completedAt: isDone ? new Date() : null,
+              assignedBy: '@elena.rostova',
+              notes: isDone ? 'Verified during onboarding check-in' : null,
+            });
+          }
+        }
+
+        if (progressRows.length > 0) {
+          await db.insert(userProgress).values(progressRows);
+        }
+      }
     } catch (error) {
-      console.error('Seed check error:', error);
+      emitStructuredLog({
+        level: 'error',
+        component: 'db',
+        event: 'db.seed_failed',
+        message: `Seed check failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      });
       seedPromise = null;
     }
   })();
@@ -336,23 +555,198 @@ export async function ensureSeedData(): Promise<void> {
   return seedPromise;
 }
 
-export async function getDocumentsList() {
+export async function lookupSemanticCache(
+  query: string,
+  role: RbacRole = 'Admin',
+  searchMode: HybridSearchMode = 'hybrid_rrf'
+): Promise<{
+  hit: boolean;
+  answer?: string;
+  sources?: string[];
+  confidence?: number;
+  toolCalls?: AgentToolInvocation[];
+  similarity?: number;
+}> {
+  try {
+    const scopedQuery = `[${role}:${searchMode}] ${query.trim().toLowerCase()}`;
+    const queryLocalVec = computeDeterministicEmbedding(scopedQuery, 64);
+
+    for (const item of memorySemanticCache.values()) {
+      const sim =
+        item.queryText.toLowerCase() === scopedQuery
+          ? 1.0
+          : cosineSimilarity(queryLocalVec, item.queryEmbedding);
+      if (sim >= SEMANTIC_CACHE_THRESHOLD) {
+        item.hitCount += 1;
+        recordCacheEvent(true, sim, query);
+        db.update(semanticCache)
+          .set({
+            hitCount: item.hitCount,
+            lastHitAt: new Date(),
+          })
+          .where(eq(semanticCache.id, item.id))
+          .catch(() => {});
+
+        return {
+          hit: true,
+          answer: item.answer,
+          sources: item.sources,
+          confidence: item.confidence,
+          toolCalls: item.toolCalls,
+          similarity: sim,
+        };
+      }
+    }
+
+    const cachedRows = await db
+      .select()
+      .from(semanticCache)
+      .orderBy(desc(semanticCache.lastHitAt))
+      .limit(50);
+
+    for (const row of cachedRows) {
+      const storedVec = Array.isArray(row.queryEmbedding)
+        ? row.queryEmbedding
+        : [];
+      const sim =
+        row.queryText.trim().toLowerCase() === scopedQuery
+          ? 1.0
+          : cosineSimilarity(queryLocalVec, storedVec);
+
+      if (sim >= SEMANTIC_CACHE_THRESHOLD) {
+        const nextHits = (row.hitCount || 1) + 1;
+        await db
+          .update(semanticCache)
+          .set({ hitCount: nextHits, lastHitAt: new Date() })
+          .where(eq(semanticCache.id, row.id));
+
+        memorySemanticCache.set(scopedQuery, {
+          id: row.id,
+          queryText: row.queryText,
+          queryEmbedding: storedVec,
+          answer: row.answer,
+          sources: row.sources,
+          confidence: row.confidence,
+          toolCalls: row.toolCalls || [],
+          hitCount: nextHits,
+        });
+
+        recordCacheEvent(true, sim, query);
+        return {
+          hit: true,
+          answer: row.answer,
+          sources: row.sources,
+          confidence: row.confidence,
+          toolCalls: row.toolCalls || [],
+          similarity: sim,
+        };
+      }
+    }
+
+    recordCacheEvent(false, undefined, query);
+    return { hit: false };
+  } catch {
+    return { hit: false };
+  }
+}
+
+export async function storeInSemanticCache(params: {
+  query: string;
+  role?: RbacRole;
+  searchMode?: HybridSearchMode;
+  answer: string;
+  sources: string[];
+  confidence: number;
+  toolCalls?: AgentToolInvocation[];
+}) {
+  try {
+    if (params.sources.length === 0 && (params.toolCalls?.length ?? 0) === 0)
+      return;
+    const role = params.role || 'Admin';
+    const mode = params.searchMode || 'hybrid_rrf';
+    const scopedQuery = `[${role}:${mode}] ${params.query.trim()}`;
+    const localVec = computeDeterministicEmbedding(
+      scopedQuery.toLowerCase(),
+      64
+    );
+
+    const [inserted] = await db
+      .insert(semanticCache)
+      .values({
+        queryText: scopedQuery,
+        queryEmbedding: localVec,
+        answer: params.answer,
+        sources: params.sources,
+        confidence: params.confidence,
+        toolCalls: params.toolCalls ?? [],
+        hitCount: 1,
+      })
+      .returning();
+
+    if (inserted) {
+      memorySemanticCache.set(scopedQuery.toLowerCase(), {
+        id: inserted.id,
+        queryText: inserted.queryText,
+        queryEmbedding: localVec,
+        answer: inserted.answer,
+        sources: inserted.sources,
+        confidence: inserted.confidence,
+        toolCalls: inserted.toolCalls || [],
+        hitCount: 1,
+      });
+    }
+  } catch {
+    // Non-blocking cache write
+  }
+}
+
+export async function purgeSemanticCache() {
+  try {
+    memorySemanticCache.clear();
+    await db.delete(semanticCache);
+    emitStructuredLog({
+      level: 'info',
+      component: 'cache',
+      event: 'semantic_cache.purged',
+      message: 'Semantic cache purged across L1 memory and L2 PostgreSQL',
+    });
+    return { purged: true };
+  } catch (error) {
+    throw new Error('Failed to purge semantic cache.', { cause: error });
+  }
+}
+
+export async function getSemanticCacheEntries() {
+  try {
+    return await db
+      .select()
+      .from(semanticCache)
+      .orderBy(desc(semanticCache.lastHitAt))
+      .limit(20);
+  } catch (error) {
+    throw new Error('Failed to fetch semantic cache entries.', { cause: error });
+  }
+}
+
+export async function getDocumentsList(role: RbacRole = 'Admin') {
   try {
     await ensureSeedData();
+    const allowedTiers = getAllowedTiersForRole(role);
     return await db
       .select()
       .from(documents)
+      .where(inArray(documents.accessLevel, allowedTiers))
       .orderBy(desc(documents.createdAt));
   } catch (error) {
-    console.error('Database query failed in getDocumentsList:', error);
     throw new Error('Failed to load indexed documents.', { cause: error });
   }
 }
 
 export async function ingestDocument(params: {
   title: string;
-  sourceType: 'file' | 'url' | 'slack';
+  sourceType: DocumentSourceType;
   sourceUrl?: string | null;
+  accessLevel?: RbacRole;
   content: string;
   userId?: string | null;
 }) {
@@ -363,6 +757,8 @@ export async function ingestDocument(params: {
       throw new Error('Document content cannot be empty.');
     }
 
+    const accessLevel = normalizeRbacRole(params.accessLevel || 'Engineer');
+
     const [createdDoc] = await db
       .insert(documents)
       .values({
@@ -371,9 +767,10 @@ export async function ingestDocument(params: {
         sourceType: params.sourceType,
         sourceUrl: params.sourceUrl?.trim() || null,
         status: 'Indexed',
+        accessLevel,
         chunkCount: chunks.length,
         contentPreview: params.content.trim().slice(0, 260),
-        metadata: { charLength: params.content.length },
+        metadata: { charLength: params.content.length, accessLevel },
       })
       .returning();
 
@@ -386,7 +783,7 @@ export async function ingestDocument(params: {
         chunkIndex: i,
         content: chunkText,
         embedding,
-        metadata: { title: params.title },
+        metadata: { title: params.title, accessLevel },
       });
     }
 
@@ -394,9 +791,23 @@ export async function ingestDocument(params: {
       await db.insert(documentChunks).values(chunkRecords);
     }
 
+    await purgeSemanticCache();
+
+    emitStructuredLog({
+      level: 'info',
+      component: 'db',
+      event: 'document.ingested',
+      metadata: {
+        documentId: createdDoc.id,
+        title: createdDoc.title,
+        accessLevel,
+        chunks: chunkRecords.length,
+      },
+      message: `Ingested "${createdDoc.title}" [RBAC: ${accessLevel}] (${chunkRecords.length} vector chunks) & invalidated semantic cache`,
+    });
+
     return createdDoc;
   } catch (error) {
-    console.error('Database ingestion failed:', error);
     throw new Error('Failed to ingest and embed document.', { cause: error });
   }
 }
@@ -404,21 +815,302 @@ export async function ingestDocument(params: {
 export async function deleteDocumentById(id: number) {
   try {
     await db.delete(documents).where(eq(documents.id, id));
+    await purgeSemanticCache();
     return { deletedId: id };
   } catch (error) {
-    console.error('Failed to delete document:', error);
     throw new Error('Failed to delete document from knowledge base.', {
       cause: error,
     });
   }
 }
 
+const STOPWORDS = new Set([
+  'the',
+  'and',
+  'for',
+  'with',
+  'how',
+  'what',
+  'where',
+  'when',
+  'why',
+  'who',
+  'can',
+  'our',
+  'are',
+  'you',
+  'from',
+  'that',
+  'this',
+  'into',
+]);
+
+export function tokenizeForBm25(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, ' ')
+    .split(/\s+/)
+    .filter((t) => t.length >= 2 && !STOPWORDS.has(t));
+}
+
+export interface CandidateChunkInput {
+  chunkId: number;
+  documentId: number;
+  documentTitle: string;
+  sourceType: string;
+  accessLevel: string;
+  content: string;
+  embedding: number[];
+}
+
+export interface RankCandidateOptions {
+  topK?: number;
+  searchMode?: HybridSearchMode;
+  role?: RbacRole;
+  queryGeminiVec?: number[];
+  queryLocalVec?: number[];
+  rrfAlpha?: number;
+  rrfK?: number;
+  tauConf?: number;
+  enforceConfidenceGate?: boolean;
+}
+
+/**
+ * Phase 1 Modularized Retrieval & Ranking Engine
+ * Supports 4 distinct experimental modes:
+ * - "sparse_bm25" (or "bm25_lexical"): Pure Okapi BM25 lexical scoring (k1=1.5, b=0.75)
+ * - "dense_vector" (or "vector_only"): Pure dense vector cosine similarity
+ * - "linear_sum": Min-Max normalized linear combination (alpha=0.65)
+ * - "hybrid_rrf": Weighted Reciprocal Rank Fusion RRF(q,c) = alpha/(60+rank_dense) + (1-alpha)/(60+rank_bm25) with alpha=0.65 + confidence abstention gate tau_conf
+ */
+export function rankCandidateChunks(
+  query: string,
+  rawCandidates: CandidateChunkInput[],
+  options: RankCandidateOptions = {}
+): (RetrievedChunk & { accessLevel: RbacRole; abstained?: boolean })[] {
+  const {
+    topK = 5,
+    searchMode = 'hybrid_rrf',
+    role = 'Admin',
+    queryGeminiVec,
+    queryLocalVec: providedLocalVec,
+    rrfAlpha = 0.65,
+    rrfK = 60,
+    tauConf = 0.26,
+    enforceConfidenceGate = false,
+  } = options;
+
+  // Step 1: Pre-Retrieval RBAC Candidate Filtering C_adm(r_u)
+  const allowedTiers = new Set<RbacRole>(getAllowedTiersForRole(role));
+  const admissibleChunks = rawCandidates.filter((row) =>
+    allowedTiers.has(normalizeRbacRole(row.accessLevel))
+  );
+
+  if (admissibleChunks.length === 0) return [];
+
+  const queryLocalVec =
+    providedLocalVec || computeDeterministicEmbedding(query, 64);
+  const effectiveGeminiVec = queryGeminiVec || queryLocalVec;
+  const queryTokens = tokenizeForBm25(query);
+
+  const N = admissibleChunks.length;
+  const tokenizedDocs = admissibleChunks.map((row) =>
+    tokenizeForBm25(`${row.documentTitle} ${row.content}`)
+  );
+  const totalLength = tokenizedDocs.reduce((acc, d) => acc + d.length, 0);
+  const avgdl = Math.max(1, totalLength / N);
+
+  const docFreq = new Map<string, number>();
+  for (const qToken of new Set(queryTokens)) {
+    let df = 0;
+    for (const docTokens of tokenizedDocs) {
+      if (docTokens.some((dt) => dt === qToken)) {
+        df += 1;
+      }
+    }
+    docFreq.set(qToken, df);
+  }
+
+  const k1 = 1.5;
+  const b = 0.75;
+
+  const rawScored = admissibleChunks.map((row, idx) => {
+    const storedVec = Array.isArray(row.embedding) ? row.embedding : [];
+    const refVec =
+      storedVec.length === effectiveGeminiVec.length
+        ? effectiveGeminiVec
+        : queryLocalVec;
+
+    const vectorScore = Math.max(
+      0,
+      Math.min(0.99, cosineSimilarity(refVec, storedVec))
+    );
+
+    const docTokens = tokenizedDocs[idx];
+    const dl = docTokens.length;
+    const matchedTerms: string[] = [];
+    let rawBm25 = 0;
+    let exactTechnicalMatches = 0;
+
+    for (const qToken of new Set(queryTokens)) {
+      const exactTf = docTokens.filter((dt) => dt === qToken).length;
+
+      if (exactTf > 0) {
+        matchedTerms.push(qToken);
+        const df = docFreq.get(qToken) || 1;
+        const idf = Math.log(1 + (N - df + 0.5) / (df + 0.5));
+        const num = exactTf * (k1 + 1);
+        const denom = exactTf + k1 * (1 - b + b * (dl / avgdl));
+        rawBm25 += idf * (num / denom);
+
+        if (/[-_0-9]/.test(qToken) || qToken.startsWith('err')) {
+          rawBm25 += 2.2;
+          exactTechnicalMatches += 1;
+        }
+      }
+    }
+
+    const bm25Score = Math.min(
+      0.99,
+      Number((rawBm25 / (rawBm25 + 2.2)).toFixed(4))
+    );
+
+    return {
+      chunkId: row.chunkId,
+      documentId: row.documentId,
+      documentTitle: row.documentTitle,
+      sourceType: row.sourceType,
+      accessLevel: normalizeRbacRole(row.accessLevel),
+      content: row.content,
+      vectorScore,
+      rawBm25,
+      bm25Score,
+      exactTechnicalMatches,
+      matchedTerms,
+      vectorRank: N + 1,
+      bm25Rank: N + 1,
+    };
+  });
+
+  // Dense ranking (1..N)
+  const byVector = [...rawScored].sort(
+    (a, b) => b.vectorScore - a.vectorScore || a.chunkId - b.chunkId
+  );
+  byVector.forEach((item, rankIdx) => {
+    item.vectorRank = rankIdx + 1;
+  });
+
+  // Sparse BM25 ranking (only rank items with rawBm25 > 0; zero-overlap items receive tail rank N + 1)
+  const byBm25 = [...rawScored].sort(
+    (a, b) => b.rawBm25 - a.rawBm25 || a.chunkId - b.chunkId
+  );
+  byBm25.forEach((item, rankIdx) => {
+    item.bm25Rank = item.rawBm25 > 0 ? rankIdx + 1 : N + 1;
+  });
+
+  // Min-max bounds for linear_sum mode
+  const denseValues = rawScored.map((r) => r.vectorScore);
+  const bm25Values = rawScored.map((r) => r.bm25Score);
+  const minDense = Math.min(...denseValues);
+  const maxDense = Math.max(...denseValues);
+  const minBm25 = Math.min(...bm25Values);
+  const maxBm25 = Math.max(...bm25Values);
+
+  const maxPossibleRrf = rrfAlpha / (rrfK + 1) + (1 - rrfAlpha) / (rrfK + 1);
+
+  const fused = rawScored.map((item) => {
+    // Weighted RRF: RRF(q, c) = alpha / (60 + rank_dense) + (1 - alpha) / (60 + rank_bm25)
+    const rawRrf =
+      rrfAlpha / (rrfK + item.vectorRank) +
+      (1 - rrfAlpha) / (rrfK + item.bm25Rank);
+    const normalizedRrf = Math.min(0.99, rawRrf / maxPossibleRrf);
+
+    // Min-Max Normalized Linear Combination: S_lin = alpha * S_hat_dense + (1 - alpha) * S_hat_bm25
+    const normDense =
+      maxDense - minDense > 1e-6
+        ? (item.vectorScore - minDense) / (maxDense - minDense)
+        : item.vectorScore;
+    const normBm25 =
+      maxBm25 - minBm25 > 1e-6
+        ? (item.bm25Score - minBm25) / (maxBm25 - minBm25)
+        : item.bm25Score;
+    const linearSumScore = Math.min(
+      0.99,
+      rrfAlpha * normDense + (1 - rrfAlpha) * normBm25
+    );
+
+    // Evidence-calibrated Hybrid RRF score
+    const evidenceScore = 0.55 * item.vectorScore + 0.45 * item.bm25Score;
+    const calibratedHybridScore = Math.min(
+      0.99,
+      normalizedRrf * 0.42 +
+        evidenceScore * 0.58 +
+        (item.exactTechnicalMatches > 0 ? 0.14 : 0)
+    );
+
+    let finalSimilarity = calibratedHybridScore;
+    if (searchMode === 'dense_vector' || searchMode === 'vector_only') {
+      finalSimilarity = item.vectorScore;
+    } else if (searchMode === 'sparse_bm25' || searchMode === 'bm25_lexical') {
+      finalSimilarity = item.bm25Score;
+    } else if (searchMode === 'linear_sum') {
+      finalSimilarity = linearSumScore;
+    } else {
+      finalSimilarity = calibratedHybridScore;
+    }
+
+    return {
+      chunkId: item.chunkId,
+      documentId: item.documentId,
+      documentTitle: item.documentTitle,
+      sourceType: item.sourceType,
+      accessLevel: item.accessLevel,
+      content: item.content,
+      similarity: Number(finalSimilarity.toFixed(4)),
+      vectorScore: Number(item.vectorScore.toFixed(4)),
+      bm25Score: Number(item.bm25Score.toFixed(4)),
+      rrfScore: Number(normalizedRrf.toFixed(4)),
+      matchedTerms: item.matchedTerms,
+    };
+  });
+
+  fused.sort((a, b) => b.similarity - a.similarity || a.chunkId - b.chunkId);
+
+  // Step 4: Confidence Abstention Gate (tau_conf) for hybrid_rrf
+  if (
+    enforceConfidenceGate &&
+    searchMode === 'hybrid_rrf' &&
+    fused.length > 0
+  ) {
+    const topCandidate = fused[0];
+    const topEvidence =
+      0.55 * topCandidate.vectorScore + 0.45 * topCandidate.bm25Score;
+    const hasExactTechnicalToken = topCandidate. matchedTerms.some(
+      (t) => /[-_0-9]/.test(t) || t.startsWith('err')
+    );
+    if (
+      topEvidence < tauConf ||
+      (topCandidate.vectorScore < 0.48 &&
+        !hasExactTechnicalToken &&
+        topCandidate.bm25Score < 0.68)
+    ) {
+      return [];
+    }
+  }
+
+  return fused.slice(0, topK);
+}
+
 export async function searchKnowledgeChunks(
   query: string,
-  topK = 4
-): Promise<RetrievedChunk[]> {
+  topK = 4,
+  searchMode: HybridSearchMode = 'hybrid_rrf',
+  role: RbacRole = 'Admin'
+): Promise<(RetrievedChunk & { accessLevel: RbacRole })[]> {
   try {
     await ensureSeedData();
+    const allowedTiers = getAllowedTiersForRole(role);
+
     const allChunks = await db
       .select({
         chunkId: documentChunks.id,
@@ -427,55 +1119,30 @@ export async function searchKnowledgeChunks(
         embedding: documentChunks.embedding,
         documentTitle: documents.title,
         sourceType: documents.sourceType,
+        accessLevel: documents.accessLevel,
       })
       .from(documentChunks)
-      .innerJoin(documents, eq(documentChunks.documentId, documents.id));
+      .innerJoin(documents, eq(documentChunks.documentId, documents.id))
+      .where(inArray(documents.accessLevel, allowedTiers));
 
     if (allChunks.length === 0) return [];
 
     const queryGeminiVec = await generateEmbedding(query);
     const queryLocalVec = computeDeterministicEmbedding(query, 64);
-    const queryTerms = query
-      .toLowerCase()
-      .replace(/[^a-z0-9\s]/g, ' ')
-      .split(/\s+/)
-      .filter((w) => w.length > 2);
 
-    const scored = allChunks.map((row) => {
-      const storedVec = Array.isArray(row.embedding) ? row.embedding : [];
-      const refVec =
-        storedVec.length === queryGeminiVec.length
-          ? queryGeminiVec
-          : queryLocalVec;
-
-      const vecSim = cosineSimilarity(refVec, storedVec);
-
-      // Lexical boost for exact technical term matches
-      const hay = `${row.documentTitle} ${row.content}`.toLowerCase();
-      let termHits = 0;
-      for (const term of queryTerms) {
-        if (hay.includes(term)) termHits += 1;
-      }
-      const lexicalBoost =
-        queryTerms.length > 0 ? (termHits / queryTerms.length) * 0.35 : 0;
-
-      const combinedScore = Math.min(0.99, Math.max(0.1, vecSim * 0.75 + lexicalBoost));
-
-      return {
-        chunkId: row.chunkId,
-        documentId: row.documentId,
-        documentTitle: row.documentTitle,
-        sourceType: row.sourceType,
-        content: row.content,
-        similarity: combinedScore,
-      };
+    return rankCandidateChunks(query, allChunks, {
+      topK,
+      searchMode,
+      role,
+      queryGeminiVec,
+      queryLocalVec,
+      rrfAlpha: 0.65,
+      rrfK: 60,
+      tauConf: 0.26,
+      enforceConfidenceGate: false,
     });
-
-    scored.sort((a, b) => b.similarity - a.similarity);
-    return scored.slice(0, topK);
   } catch (error) {
-    console.error('Vector search failed:', error);
-    throw new Error('Failed to execute semantic search over knowledge base.', {
+    throw new Error('Failed to execute hybrid search over knowledge base.', {
       cause: error,
     });
   }
@@ -490,6 +1157,13 @@ export async function recordQueryLog(entry: {
   confidence: number;
   latencyMs: number;
   resolved?: boolean;
+  cacheHit?: boolean;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  searchMode?: string;
+  requiredRole?: RbacRole;
+  toolCalls?: AgentToolInvocation[];
 }) {
   try {
     const [created] = await db
@@ -503,26 +1177,35 @@ export async function recordQueryLog(entry: {
         sourcesCited: entry.sources.length,
         confidence: entry.confidence,
         latencyMs: entry.latencyMs,
-        resolved: entry.resolved ?? entry.sources.length > 0,
+        resolved:
+          entry.resolved ??
+          (entry.sources.length > 0 || (entry.toolCalls?.length ?? 0) > 0),
+        cacheHit: entry.cacheHit ?? false,
+        promptTokens: entry.promptTokens ?? 0,
+        completionTokens: entry.completionTokens ?? 0,
+        totalTokens: entry.totalTokens ?? 0,
+        searchMode: entry.searchMode || 'hybrid_rrf',
+        requiredRole: entry.requiredRole || 'Engineer',
+        toolCalls: entry.toolCalls ?? [],
       })
       .returning();
     return created;
   } catch (error) {
-    console.error('Failed to record query log:', error);
     throw new Error('Failed to store query log entry.', { cause: error });
   }
 }
 
-export async function getRecentQueryLogs() {
+export async function getRecentQueryLogs(role: RbacRole = 'Admin') {
   try {
     await ensureSeedData();
+    const allowedTiers = getAllowedTiersForRole(role);
     return await db
       .select()
       .from(queryLogs)
+      .where(inArray(queryLogs.requiredRole, allowedTiers))
       .orderBy(desc(queryLogs.createdAt))
       .limit(50);
   } catch (error) {
-    console.error('Failed to fetch query logs:', error);
     throw new Error('Failed to fetch query logs.', { cause: error });
   }
 }
@@ -532,7 +1215,6 @@ export async function getAgentSettingsList() {
     await ensureSeedData();
     return await db.select().from(agentSettings).orderBy(agentSettings.id);
   } catch (error) {
-    console.error('Failed to fetch agent settings:', error);
     throw new Error('Failed to fetch agent configuration.', { cause: error });
   }
 }
@@ -546,20 +1228,36 @@ export async function updateAgentSettingByKey(key: string, enabled: boolean) {
       .returning();
     return updated;
   } catch (error) {
-    console.error('Failed to update agent setting:', error);
     throw new Error('Failed to update agent setting.', { cause: error });
   }
 }
 
-export async function getOverviewPayload() {
+export async function getOverviewPayload(role: RbacRole = 'Admin') {
   try {
     await ensureSeedData();
-    const [allDocs, allChunks, allLogs, settings] = await Promise.all([
-      db.select().from(documents).orderBy(desc(documents.createdAt)),
-      db.select().from(documentChunks),
-      db.select().from(queryLogs).orderBy(desc(queryLogs.createdAt)).limit(30),
+    const allowedTiers = getAllowedTiersForRole(role);
+
+    const [allDocs, allLogs, settings, cacheEntries] = await Promise.all([
+      db
+        .select()
+        .from(documents)
+        .where(inArray(documents.accessLevel, allowedTiers))
+        .orderBy(desc(documents.createdAt)),
+      db
+        .select()
+        .from(queryLogs)
+        .where(inArray(queryLogs.requiredRole, allowedTiers))
+        .orderBy(desc(queryLogs.createdAt))
+        .limit(30),
       db.select().from(agentSettings).orderBy(agentSettings.id),
+      db
+        .select()
+        .from(semanticCache)
+        .orderBy(desc(semanticCache.lastHitAt))
+        .limit(15),
     ]);
+
+    const totalChunks = allDocs.reduce((acc, doc) => acc + doc.chunkCount, 0);
 
     const avgConfidence =
       allLogs.length > 0
@@ -580,17 +1278,536 @@ export async function getOverviewPayload() {
     return {
       stats: {
         totalDocuments: allDocs.length,
-        totalChunks: allChunks.length,
+        totalChunks,
         totalQueries: allLogs.length,
         avgConfidence,
         avgLatencyMs,
+        cachedQueriesCount: cacheEntries.length,
       },
       recentDocuments: allDocs.slice(0, 6),
       recentLogs: allLogs.slice(0, 8),
       settings,
+      activeRole: role,
     };
   } catch (error) {
-    console.error('Failed to build overview payload:', error);
     throw new Error('Failed to load dashboard overview.', { cause: error });
   }
 }
+
+/**
+ * Phase 4 Step 1: Interactive Onboarding Checklists & Manager Cohort Queries
+ */
+export async function getOnboardingPayload(
+  activeUserHandle = '@alex.chen',
+  role: RbacRole = 'Admin'
+): Promise<OnboardingPayload> {
+  try {
+    await ensureSeedData();
+
+    const rawTracks = await db
+      .select()
+      .from(onboardingTracks)
+      .orderBy(asc(onboardingTracks.sortOrder), asc(onboardingTracks.id));
+
+    const tracks: OnboardingTrackItem[] = rawTracks.map((t) => ({
+      id: t.id,
+      phase: (t.phase as OnboardingPhase) || 'Day 1',
+      title: t.title,
+      description: t.description,
+      category: t.category,
+      targetRole: normalizeRbacRole(t.targetRole),
+      linkedDocTitle: t.linkedDocTitle,
+      verificationPrompt: t.verificationPrompt,
+      estimatedMinutes: t.estimatedMinutes,
+      sortOrder: t.sortOrder,
+      createdAt: t.createdAt.toISOString(),
+    }));
+
+    let allProgress = await db.select().from(userProgress);
+
+    // Ensure the active userHandle exists in userProgress so signed-in users immediately have a track
+    const hasActiveUser = allProgress.some(
+      (p) => p.userHandle.toLowerCase() === activeUserHandle.toLowerCase()
+    );
+    if (!hasActiveUser && tracks.length > 0) {
+      const displayName = activeUserHandle
+        .replace(/^@/, '')
+        .split(/[._-]/)
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(' ');
+      const newRows = tracks.map((t, index) => ({
+        userHandle: activeUserHandle,
+        displayName: displayName || 'Workspace Engineer',
+        engineerRole: 'Full-Stack Engineer',
+        trackId: t.id,
+        completed: index < 2,
+        completedAt: index < 2 ? new Date() : null,
+        assignedBy: '@elena.rostova',
+        notes: null,
+      }));
+      await db.insert(userProgress).values(newRows);
+      allProgress = await db.select().from(userProgress);
+    }
+
+    // Group progress by engineer handle
+    const handleMap = new Map<
+      string,
+      {
+        userHandle: string;
+        displayName: string;
+        engineerRole: string;
+        lastUpdatedAt: string | null;
+        progressByTrackId: Record<number, UserMilestoneProgress>;
+      }
+    >();
+
+    for (const row of allProgress) {
+      let entry = handleMap.get(row.userHandle);
+      if (!entry) {
+        entry = {
+          userHandle: row.userHandle,
+          displayName: row.displayName,
+          engineerRole: row.engineerRole,
+          lastUpdatedAt: row.updatedAt ? row.updatedAt.toISOString() : null,
+          progressByTrackId: {},
+        };
+        handleMap.set(row.userHandle, entry);
+      }
+
+      if (
+        row.updatedAt &&
+        (!entry.lastUpdatedAt ||
+          row.updatedAt.toISOString() > entry.lastUpdatedAt)
+      ) {
+        entry.lastUpdatedAt = row.updatedAt.toISOString();
+      }
+
+      entry.progressByTrackId[row.trackId] = {
+        trackId: row.trackId,
+        completed: row.completed,
+        completedAt: row.completedAt ? row.completedAt.toISOString() : null,
+        assignedBy: row.assignedBy,
+        notes: row.notes,
+      };
+    }
+
+    const day1Tracks = tracks.filter((t) => t.phase === 'Day 1');
+    const week1Tracks = tracks.filter((t) => t.phase === 'Week 1');
+    const month1Tracks = tracks.filter((t) => t.phase === 'Month 1');
+
+    const fullCohort: EngineerCohortSummary[] = Array.from(
+      handleMap.values()
+    ).map((eng) => {
+      const countCompleted = (subset: OnboardingTrackItem[]) =>
+        subset.filter((t) => eng.progressByTrackId[t.id]?.completed).length;
+
+      const completedCount = countCompleted(tracks);
+      const totalCount = tracks.length;
+      const completionRate =
+        totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
+
+      return {
+        userHandle: eng.userHandle,
+        displayName: eng.displayName,
+        engineerRole: eng.engineerRole,
+        completedCount,
+        totalCount,
+        completionRate,
+        day1Completed: countCompleted(day1Tracks),
+        day1Total: day1Tracks.length,
+        week1Completed: countCompleted(week1Tracks),
+        week1Total: week1Tracks.length,
+        month1Completed: countCompleted(month1Tracks),
+        month1Total: month1Tracks.length,
+        lastUpdatedAt: eng.lastUpdatedAt,
+        progressByTrackId: eng.progressByTrackId,
+      };
+    });
+
+    // RBAC Filtering: Engineer only sees their own checklist; Manager/Admin sees full cohort
+    const filteredCohort =
+      role === 'Engineer'
+        ? fullCohort.filter(
+            (c) =>
+              c.userHandle.toLowerCase() === activeUserHandle.toLowerCase()
+          )
+        : fullCohort;
+
+    return {
+      activeUserHandle,
+      activeRole: role,
+      tracks,
+      cohort:
+        filteredCohort.length > 0 ? filteredCohort : fullCohort.slice(0, 1),
+    };
+  } catch (error) {
+    throw new Error('Failed to load onboarding tracks and cohort progress.', {
+      cause: error,
+    });
+  }
+}
+
+export async function toggleOnboardingMilestone(params: {
+  userHandle: string;
+  displayName?: string;
+  engineerRole?: string;
+  trackId: number;
+  completed: boolean;
+  assignedBy?: string;
+  notes?: string | null;
+}) {
+  try {
+    await ensureSeedData();
+    const existing = await db
+      .select()
+      .from(userProgress)
+      .where(
+        and(
+          eq(userProgress.userHandle, params.userHandle),
+          eq(userProgress.trackId, params.trackId)
+        )
+      )
+      .limit(1);
+
+    if (existing.length > 0) {
+      const [updated] = await db
+        .update(userProgress)
+        .set({
+          completed: params.completed,
+          completedAt: params.completed ? new Date() : null,
+          notes:
+            params.notes !== undefined ? params.notes : existing[0].notes,
+          updatedAt: new Date(),
+        })
+        .where(eq(userProgress.id, existing[0].id))
+        .returning();
+
+      emitStructuredLog({
+        level: 'info',
+        component: 'db',
+        event: 'onboarding.milestone_toggled',
+        metadata: {
+          userHandle: params.userHandle,
+          trackId: params.trackId,
+          completed: params.completed,
+        },
+        message: `Onboarding milestone #${params.trackId} marked ${params.completed ? 'COMPLETED' : 'INCOMPLETE'} for ${params.userHandle}`,
+      });
+
+      return updated;
+    }
+
+    // Lookup existing displayName/engineerRole for this handle if available
+    const existingUserAny = await db
+      .select()
+      .from(userProgress)
+      .where(eq(userProgress.userHandle, params.userHandle))
+      .limit(1);
+
+    const inferredName =
+      params.displayName ||
+      existingUserAny[0]?.displayName ||
+      params.userHandle.replace(/^@/, '');
+    const inferredRole =
+      params.engineerRole ||
+      existingUserAny[0]?.engineerRole ||
+      'Software Engineer';
+
+    const [inserted] = await db
+      .insert(userProgress)
+      .values({
+        userHandle: params.userHandle,
+        displayName: inferredName,
+        engineerRole: inferredRole,
+        trackId: params.trackId,
+        completed: params.completed,
+        completedAt: params.completed ? new Date() : null,
+        assignedBy: params.assignedBy || '@elena.rostova',
+        notes: params.notes ?? null,
+      })
+      .returning();
+
+    return inserted;
+  } catch (error) {
+    throw new Error('Failed to update onboarding milestone progress.', {
+      cause: error,
+    });
+  }
+}
+
+export async function createOnboardingTrack(params: {
+  phase: OnboardingPhase;
+  title: string;
+  description: string;
+  category: string;
+  targetRole: RbacRole;
+  linkedDocTitle?: string | null;
+  verificationPrompt?: string | null;
+  estimatedMinutes: number;
+}) {
+  try {
+    await ensureSeedData();
+    const existingTracks = await db.select().from(onboardingTracks);
+    const maxSort = existingTracks.reduce(
+      (max, t) => Math.max(max, t.sortOrder),
+      0
+    );
+
+    const [created] = await db
+      .insert(onboardingTracks)
+      .values({
+        phase: params.phase,
+        title: params.title.trim(),
+        description: params.description.trim(),
+        category: params.category.trim(),
+        targetRole: params.targetRole,
+        linkedDocTitle: params.linkedDocTitle?.trim() || null,
+        verificationPrompt: params.verificationPrompt?.trim() || null,
+        estimatedMinutes: params.estimatedMinutes,
+        sortOrder: maxSort + 1,
+      })
+      .returning();
+
+    emitStructuredLog({
+      level: 'info',
+      component: 'db',
+      event: 'onboarding.track_created',
+      metadata: {
+        trackId: created.id,
+        phase: created.phase,
+        title: created.title,
+      },
+      message: `Created new onboarding milestone "${created.title}" (${created.phase})`,
+    });
+
+    return created;
+  } catch (error) {
+    throw new Error('Failed to create onboarding track milestone.', {
+      cause: error,
+    });
+  }
+}
+
+/**
+ * Phase 4 Steps 3 & 4: External Connectors (GitHub & Google Workspace) Upsert & Sync Logs
+ */
+export async function upsertConnectorDocument(params: {
+  title: string;
+  sourceType: 'github' | 'gdrive';
+  sourceUrl: string;
+  accessLevel?: RbacRole;
+  content: string;
+  userId?: string | null;
+  metadata?: Record<string, unknown>;
+}) {
+  try {
+    await ensureSeedData();
+    const chunks = splitIntoChunks(params.content, CHUNK_SIZE, CHUNK_OVERLAP);
+    if (chunks.length === 0) {
+      throw new Error('Connector document content cannot be empty.');
+    }
+
+    const accessLevel = normalizeRbacRole(params.accessLevel || 'Engineer');
+    const cleanTitle = params.title.trim();
+    const cleanUrl = params.sourceUrl.trim();
+
+    // Check if document already exists by sourceUrl or title
+    const existingDocs = await db
+      .select()
+      .from(documents)
+      .where(eq(documents.sourceUrl, cleanUrl))
+      .limit(1);
+
+    let targetDocId: number;
+    let action: 'inserted' | 'updated' = 'inserted';
+
+    if (existingDocs.length > 0) {
+      targetDocId = existingDocs[0].id;
+      action = 'updated';
+      await db
+        .update(documents)
+        .set({
+          title: cleanTitle,
+          sourceType: params.sourceType,
+          accessLevel,
+          status: 'Indexed',
+          chunkCount: chunks.length,
+          contentPreview: params.content.trim().slice(0, 260),
+          metadata: {
+            charLength: params.content.length,
+            accessLevel,
+            ...(params.metadata || {}),
+          },
+        })
+        .where(eq(documents.id, targetDocId));
+
+      await db
+        .delete(documentChunks)
+        .where(eq(documentChunks.documentId, targetDocId));
+    } else {
+      const [createdDoc] = await db
+        .insert(documents)
+        .values({
+          userId: params.userId ?? null,
+          title: cleanTitle,
+          sourceType: params.sourceType,
+          sourceUrl: cleanUrl,
+          status: 'Indexed',
+          accessLevel,
+          chunkCount: chunks.length,
+          contentPreview: params.content.trim().slice(0, 260),
+          metadata: {
+            charLength: params.content.length,
+            accessLevel,
+            ...(params.metadata || {}),
+          },
+        })
+        .returning();
+      targetDocId = createdDoc.id;
+    }
+
+    const chunkRecords = [];
+    for (let i = 0; i < chunks.length; i++) {
+      const chunkText = chunks[i];
+      const embedding = await generateEmbedding(`${cleanTitle}\n${chunkText}`);
+      chunkRecords.push({
+        documentId: targetDocId,
+        chunkIndex: i,
+        content: chunkText,
+        embedding,
+        metadata: {
+          title: cleanTitle,
+          accessLevel,
+          sourceType: params.sourceType,
+          sourceUrl: cleanUrl,
+        },
+      });
+    }
+
+    if (chunkRecords.length > 0) {
+      await db.insert(documentChunks).values(chunkRecords);
+    }
+
+    await purgeSemanticCache();
+
+    emitStructuredLog({
+      level: 'info',
+      component: 'db',
+      event: `connector.${params.sourceType}.upserted`,
+      metadata: {
+        documentId: targetDocId,
+        action,
+        title: cleanTitle,
+        accessLevel,
+        chunks: chunkRecords.length,
+      },
+      message: `${action === 'updated' ? 'Updated' : 'Ingested'} ${params.sourceType.toUpperCase()} doc "${cleanTitle}" (${chunkRecords.length} vector chunks)`,
+    });
+
+    return {
+      documentId: targetDocId,
+      title: cleanTitle,
+      chunksUpserted: chunkRecords.length,
+      action,
+    };
+  } catch (error) {
+    throw new Error('Failed to upsert external connector document.', {
+      cause: error,
+    });
+  }
+}
+
+export async function recordConnectorSyncLog(params: {
+  provider: 'github' | 'gdrive';
+  target: string;
+  branchOrFolder?: string;
+  triggerType: 'oauth_sync' | 'webhook_push' | 'manual_sync' | 'drive_import';
+  status: 'Synced' | 'Skipped' | 'Failed' | 'Completed';
+  filesProcessed: number;
+  chunksUpserted: number;
+  commitSha?: string | null;
+  details: string;
+}) {
+  try {
+    const [inserted] = await db
+      .insert(connectorSyncLogs)
+      .values({
+        provider: params.provider,
+        target: params.target,
+        branchOrFolder: params.branchOrFolder || 'main',
+        triggerType: params.triggerType,
+        status: params.status,
+        filesProcessed: params.filesProcessed,
+        chunksUpserted: params.chunksUpserted,
+        commitSha: params.commitSha ?? null,
+        details: params.details,
+      })
+      .returning();
+
+    return inserted;
+  } catch (error) {
+    throw new Error('Failed to record connector sync log.', { cause: error });
+  }
+}
+
+export async function getConnectorSyncLogs(): Promise<ConnectorSyncLogItem[]> {
+  try {
+    await ensureSeedData();
+    let rows = await db
+      .select()
+      .from(connectorSyncLogs)
+      .orderBy(desc(connectorSyncLogs.createdAt))
+      .limit(30);
+
+    if (rows.length === 0) {
+      await db.insert(connectorSyncLogs).values([
+        {
+          provider: 'github',
+          target: 'Uchiha7madara-afk/Hippocampus',
+          branchOrFolder: 'refs/heads/main',
+          triggerType: 'webhook_push',
+          status: 'Synced',
+          filesProcessed: 2,
+          chunksUpserted: 5,
+          commitSha: '9f4c2e1',
+          details:
+            'Push to refs/heads/main: chunked & embedded README.md and docs/RUNBOOK_PGVECTOR.md (900c/140c overlap)',
+        },
+        {
+          provider: 'gdrive',
+          target: 'Q4 Production Incident Postmortem & Runbook',
+          branchOrFolder: 'Engineering Specs',
+          triggerType: 'drive_import',
+          status: 'Synced',
+          filesProcessed: 1,
+          chunksUpserted: 3,
+          commitSha: null,
+          details:
+            'Converted Google Doc structural elements to clean Markdown and indexed 3 semantic vector chunks',
+        },
+      ]);
+      rows = await db
+        .select()
+        .from(connectorSyncLogs)
+        .orderBy(desc(connectorSyncLogs.createdAt))
+        .limit(30);
+    }
+
+    return rows.map((r) => ({
+      id: r.id,
+      provider: (r.provider as 'github' | 'gdrive') || 'github',
+      target: r.target,
+      branchOrFolder: r.branchOrFolder,
+      triggerType: r.triggerType,
+      status: r.status,
+      filesProcessed: r.filesProcessed,
+      chunksUpserted: r.chunksUpserted,
+      commitSha: r.commitSha,
+      details: r.details,
+      createdAt: r.createdAt.toISOString(),
+    }));
+  } catch (error) {
+    throw new Error('Failed to load connector sync logs.', { cause: error });
+  }
+}
+

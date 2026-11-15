@@ -1,0 +1,781 @@
+{
+  "metadata": {
+    "benchmarkName": "Hippocampus Enterprise RAG & RBAC Evaluation Suite v1.0",
+    "corpusSize": 52,
+    "queryCount": 50,
+    "queryBreakdown": {
+      "exact_match": 20,
+      "conceptual": 20,
+      "adversarial_ood": 5,
+      "adversarial_rbac": 5
+    }
+  },
+  "corpus": [
+    {
+      "docId": "DOC-001",
+      "title": "Engineering Onboarding & Okta SAML 2.0 SSO Setup Guide",
+      "accessLevel": "Engineer",
+      "domain": "identity",
+      "content": "# Engineering Onboarding & SSO Configuration\nTo configure SAML 2.0 / OIDC Single Sign-On (SSO) for your engineering team workspace, navigate to Workspace Settings > Security & Identity > SSO Provider. Select Okta, Google Workspace SAML, or Azure Entra ID. Copy the ACS URL (https://auth.hippocampus.internal/saml/callback) and Entity ID (urn:hippocampus:enterprise:sp) into your IdP console. Map attributes: email, firstName, lastName, and groups.\n\n## Troubleshooting SAML Error Codes\nWhen clocks between the Identity Provider and Service Provider drift by more than 120 seconds, assertions fail with error code ERR_SAML_SIGNATURE_SKEW (tracked in Jira ENG-1042 and fixed via --clock-skew-tolerance-sec=120 in PR #502). If group claims are missing, error ERR_SAML_GROUP_MAPPING_EMPTY is raised."
+    },
+    {
+      "docId": "DOC-002",
+      "title": "Federation Session Lifecycle & OIDC Refresh Token Policy",
+      "accessLevel": "Engineer",
+      "domain": "identity",
+      "content": "# Federation Session Lifecycle & OIDC Token Renewal\nEnterprise user login sessions use short-lived JWT access tokens (15-minute expiry) paired with rotating refresh tokens stored in HttpOnly SameSite=None cookies. When an identity provider updates its X.509 signing certificate, our federation gateway validates both primary and secondary keys simultaneously for a 24-hour rollover window so active user authentication sessions are never interrupted."
+    },
+    {
+      "docId": "DOC-003",
+      "title": "SCIM 2.0 Automated Directory Provisioning Runbook",
+      "accessLevel": "Engineer",
+      "domain": "identity",
+      "content": "# SCIM 2.0 Directory Sync & Deprovisioning\nAutomated user lifecycle management runs via SCIM 2.0 webhooks from Okta. When an employee changes departments, SCIM PATCH requests update the workspace role attribute within 60 seconds. Failed SCIM payload schema validations emit code ERR_SCIM_SCHEMA_MUTATION_INVALID."
+    },
+    {
+      "docId": "DOC-004",
+      "title": "API Reference v2 — Sliding-Window Rate Limits & Quotas",
+      "accessLevel": "Engineer",
+      "domain": "ratelimit",
+      "content": "# API Rate Limits & Tier Quotas (v2)\nAll Hippocampus REST and Vector Ingestion endpoints enforce sliding-window rate limits per API key. Starter Plan allows 60 requests/minute; Pro Plan allows 600 requests/minute (10 req/sec burst up to 30 req/sec); Enterprise Plan allows 3,000 requests/minute. Responses include headers X-RateLimit-Limit, X-RateLimit-Remaining, and X-RateLimit-Reset.\n\n## Upstash Distributed Counter Configuration\nTo enable distributed sliding-window counters across multi-instance deployments, configure environment variable UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN. If quota is exceeded, the gateway returns HTTP 429 with error code ERR_RATE_LIMIT_SLIDING_WINDOW_EXCEEDED."
+    },
+    {
+      "docId": "DOC-005",
+      "title": "Zero-Downtime API Key Rotation & Compromised Credential Rollover",
+      "accessLevel": "Engineer",
+      "domain": "ratelimit",
+      "content": "# Zero-Downtime API Key Rotation\nWhen an engineering team needs to replace a leaked or compromised API credential without breaking live production traffic, navigate to Developer Console > API Keys > Roll Key. Select a 24-hour dual-validity grace window during which both the old and newly generated tokens are accepted by the gateway while downstream microservices update their secret environment variables."
+    },
+    {
+      "docId": "DOC-006",
+      "title": "Slack Events Webhook & HMAC-SHA256 Signing Runbook",
+      "accessLevel": "Engineer",
+      "domain": "slack",
+      "content": "# Configuring Slack Events API & Webhooks\nHippocampus listens to Slack workspace events at POST /api/slack/events. Subscribe to app_mention and member_joined_channel. Copy the Signing Secret from Basic Information > App Credentials into environment variable SLACK_SIGNING_SECRET. Every incoming request is verified using HMAC-SHA256 (v0:timestamp:rawBody) via crypto.timingSafeEqual with a strict 300-second replay window (tracked in Jira SEC-309). Invalid signatures fail with ERR_SLACK_HMAC_SIGNATURE_MISMATCH."
+    },
+    {
+      "docId": "DOC-007",
+      "title": "Async Webhook Acknowledgement & Retry Storm Idempotency Guard",
+      "accessLevel": "Engineer",
+      "domain": "slack",
+      "content": "# Preventing Webhook Retry Storms & Duplicate Bot Replies\nChat platforms enforce a strict 3-second HTTP timeout on event callbacks. If synchronous LLM generation blocks the HTTP response, the platform resends the identical event payload multiple times with header x-slack-retry-num. Hippocampus prevents duplicate message storms by acknowledging every callback in under 15ms with HTTP 200 OK, recording the event_id in a deduplication cache, and offloading RAG synthesis to an asynchronous background worker."
+    },
+    {
+      "docId": "DOC-008",
+      "title": "Local macOS Apple Silicon Dev Stack & OrbStack Setup",
+      "accessLevel": "Engineer",
+      "domain": "localdev",
+      "content": "# Local Development Environment on macOS (Apple Silicon)\nTo bootstrap a new engineer workstation on macOS M-series laptops, install Homebrew packages node@22, pnpm, postgresql@16, pgvector, and redis. Clone the repository, copy .env.example to .env.local, and run pnpm db:push followed by pnpm dev. For containerized local development on Apple Silicon, execute docker compose up -d postgres-vector or use OrbStack on port 5432. If shared memory allocation fails during vector build, set flag --shm-size=2g."
+    },
+    {
+      "docId": "DOC-009",
+      "title": "Devcontainer & Node.js V8 Heap Allocation Troubleshooting",
+      "accessLevel": "Engineer",
+      "domain": "localdev",
+      "content": "# Node.js Heap Exhaustion & Devcontainer Tuning\nWhen running large TypeScript compilation or batch embedding scripts locally, Node.js may terminate with JavaScript heap out of memory. Fix this by exporting NODE_OPTIONS=\"--max-old-space-size=8192\" in your shell profile before invoking tsx or vite build."
+    },
+    {
+      "docId": "DOC-010",
+      "title": "Staging & Production Cloud Run Deployment Pipeline",
+      "accessLevel": "Engineer",
+      "domain": "cicd",
+      "content": "# Staging & Production Deployment Process\nOur CI/CD pipeline runs on GitHub Actions and deploys containerized services to Cloud Run. Every pull request merged into main builds the container image, runs tsc --noEmit and Playwright E2E tests, and deploys to staging.hippocampus.internal. Instant production traffic rollback to the prior healthy revision is executed via CLI command: gcloud run services update-traffic hippocampus-prod --to-revisions=PREVIOUS=100."
+    },
+    {
+      "docId": "DOC-011",
+      "title": "Canary Release Verification & Automated Traffic Shifting",
+      "accessLevel": "Engineer",
+      "domain": "cicd",
+      "content": "# Progressive Canary Releases & Error-Budget Gating\nBefore routing 100% of user traffic to a newly built container release, our deployment pipeline shifts 5% of live requests to the canary revision for a 15-minute bake period. If 5xx error rates stay below 0.1% and P95 latency does not regress, traffic automatically promotes to 100%; otherwise, the release controller aborts and reverts traffic to the stable revision."
+    },
+    {
+      "docId": "DOC-012",
+      "title": "Hybrid Vector Indexing Pipeline — pgvector HNSW & Okapi BM25",
+      "accessLevel": "Engineer",
+      "domain": "vector",
+      "content": "# Hybrid Vector Indexing & Reciprocal Rank Fusion\nHippocampus indexes knowledge chunks in PostgreSQL using pgvector HNSW indexes (m=16, ef_construction=128) paired with Okapi BM25 lexical scoring (k1=1.5, b=0.75) and Reciprocal Rank Fusion (RRF k=60, alpha=0.65). To tune recall during high-precision queries, set PostgreSQL session parameter SET hnsw.ef_search = 120;. If an embedding model dimension changes without re-indexing, PostgreSQL raises error ERR_PGVECTOR_DIM_MISMATCH."
+    },
+    {
+      "docId": "DOC-013",
+      "title": "Semantic Chunking Granularity & Sliding Window Overlap Strategy",
+      "accessLevel": "Engineer",
+      "domain": "vector",
+      "content": "# Document Segmentation & Sliding Context Windows\nSplitting technical runbooks into fixed-size segments without overlap often severs code blocks from their surrounding explanatory paragraphs. Our ingestion pipeline segments documents using a sliding character window with configurable overlap so boundary sentences appear in both adjacent chunks, preserving contextual coherence during dense embedding and lexical retrieval."
+    },
+    {
+      "docId": "DOC-014",
+      "title": "PgBouncer Transaction Pooling & Serverless Connection Saturation",
+      "accessLevel": "Engineer",
+      "domain": "database",
+      "content": "# PgBouncer Connection Pooling Architecture\nDuring high-concurrency traffic spikes, serverless compute workers can rapidly exhaust PostgreSQL max_connections by opening direct TCP sockets. To protect the relational database from connection saturation, all Drizzle ORM workers connect through PgBouncer in transaction pooling mode on port 6432 with max_client_conn=500 and default_pool_size=25. Inspect live pool saturation by executing SQL admin command SHOW POOLS; on the PgBouncer console. Pool exhaustion emits ERR_PGBOUNCER_CLIENT_LIMIT."
+    },
+    {
+      "docId": "DOC-015",
+      "title": "PostgreSQL Vacuum Autovacuum Tuning & MVCC Bloat Prevention",
+      "accessLevel": "Engineer",
+      "domain": "database",
+      "content": "# High-Churn Table Autovacuum Tuning\nFrequent vector chunk upserts from GitHub webhooks generate dead MVCC tuples in document_chunks. Set autovacuum_vacuum_scale_factor = 0.02 and autovacuum_analyze_scale_factor = 0.01 on document_chunks to prevent table bloat and index scan degradation."
+    },
+    {
+      "docId": "DOC-016",
+      "title": "Multi-Region Cloud SQL & GKE Disaster Recovery Failover",
+      "accessLevel": "Engineer",
+      "domain": "failover",
+      "content": "# Multi-Region Disaster Recovery & Replica Promotion\nHippocampus maintains a primary Cloud SQL instance in us-east1 with cross-region read replicas in asia-east1 and europe-west1. In the event of a regional cloud outage, our target Recovery Time Objective (RTO) is under 180 seconds with near-zero Recovery Point Objective (RPO). Engineers drain webhook queues and promote the standby replica using CLI command gcloud sql instances promote-replica hippocampus-db-replica-asia."
+    },
+    {
+      "docId": "DOC-017",
+      "title": "Kafka Event Streaming, Consumer Lag & Dead-Letter Queue (DLQ) Runbook",
+      "accessLevel": "Engineer",
+      "domain": "kafka",
+      "content": "# Kafka Consumer Group Rebalancing & DLQ Recovery\nAsynchronous document ingestion events flow through Apache Kafka topic hippocampus.ingestion.v1. When a consumer group falls behind real-time message production (consumer lag), unprocessable poison-pill messages are routed to hippocampus.ingestion.dlq after 3 exponential backoff retries. If a consumer requests an expired log segment, broker error ERR_KAFKA_OFFSET_OUT_OF_RANGE is raised; reset offsets via kafka-consumer-groups.sh --reset-offsets --to-earliest."
+    },
+    {
+      "docId": "DOC-018",
+      "title": "Kafka Partition Key Design & Ordering Guarantees",
+      "accessLevel": "Engineer",
+      "domain": "kafka",
+      "content": "# Preserving Document Mutation Ordering in Event Streams\nTo guarantee that sequential edits to the same engineering runbook are processed in strict chronological order without race conditions, producer services hash the canonical documentId as the partition key, routing all updates for a given document to the same broker partition."
+    },
+    {
+      "docId": "DOC-019",
+      "title": "OpenTelemetry Distributed Tracing & Tail-Based Sampling Guide",
+      "accessLevel": "Engineer",
+      "domain": "tracing",
+      "content": "# Distributed Tracing with OpenTelemetry & W3C TraceContext\nAll microservices propagate W3C traceparent headers across HTTP and gRPC boundaries. To capture 100% of anomalous high-latency or error traces without incurring massive storage costs on normal requests, our OpenTelemetry Collector uses tail-based sampling. Configure batch export throughput using environment variable OTEL_BSP_MAX_EXPORT_BATCH_SIZE=2048."
+    },
+    {
+      "docId": "DOC-020",
+      "title": "Pino Structured JSON Telemetry & Ring-Buffer Observability",
+      "accessLevel": "Engineer",
+      "domain": "tracing",
+      "content": "# Structured Application Logging with Pino\nHippocampus emits structured JSON logs via Pino v10 with ISO-8601 timestamps, request correlation IDs, Gemini token usage counters, and semantic cache hit flags. The in-memory ring buffer retains the most recent 120 structured events for real-time inspection in the Console Telemetry Drawer."
+    },
+    {
+      "docId": "DOC-021",
+      "title": "Kubernetes Pod OOMKilled Troubleshooting & QoS Resource Classes",
+      "accessLevel": "Engineer",
+      "domain": "kubernetes",
+      "content": "# Resolving Kubernetes OOMKilled Containers (Exit Code 137)\nWhen a container exceeds its cgroup memory ceiling, the Linux kernel OOM killer terminates the process with exit code 137 (OOMKilled). To assign Guaranteed Quality of Service (QoS) and protect critical RAG workers from node-pressure eviction, set identical values for resources.requests.memory and resources.limits.memory in the Kubernetes Deployment manifest. Inspect eviction events via kubectl describe pod --show-events=true."
+    },
+    {
+      "docId": "DOC-022",
+      "title": "Kubernetes Horizontal Pod Autoscaler (HPA) Custom Metrics",
+      "accessLevel": "Engineer",
+      "domain": "kubernetes",
+      "content": "# Autoscaling Worker Pods on Queue Depth\nRather than scaling solely on CPU utilization, our Kubernetes Horizontal Pod Autoscaler monitors pending ingestion queue depth via Prometheus Adapter, spinning up additional worker replicas whenever queued tasks exceed 50 items per pod."
+    },
+    {
+      "docId": "DOC-023",
+      "title": "HashiCorp Vault Dynamic Database Secrets & KMS Auto-Unseal",
+      "accessLevel": "Engineer",
+      "domain": "vault",
+      "content": "# Dynamic Credential Leasing & Envelope Encryption with Vault\nInstead of static database passwords, backend pods request short-lived PostgreSQL credentials from HashiCorp Vault that automatically expire when their lease TTL elapses. Vault master keys are protected via Google Cloud KMS envelope encryption. If quorum unsealing fails after a cluster restart, error ERR_VAULT_SEALED_QUORUM is emitted; inspect status via vault operator raft list-peers."
+    },
+    {
+      "docId": "DOC-024",
+      "title": "Terraform Infrastructure-as-Code & Remote State Lock Recovery",
+      "accessLevel": "Engineer",
+      "domain": "terraform",
+      "content": "# Terraform Remote State Locking & Drift Remediation\nAll cloud infrastructure is provisioned via Terraform modules with remote state stored in an encrypted GCS bucket. Concurrent CI runs are serialized using state locks; if an aborted CI runner leaves a stale lock behind, error ERR_TF_STATE_LOCK_HELD is returned. Clear a verified stale lock using CLI command: terraform force-unlock -force <LOCK_ID>."
+    },
+    {
+      "docId": "DOC-025",
+      "title": "gRPC Microservice Keepalive, Deadlines & Envoy mTLS Mesh",
+      "accessLevel": "Engineer",
+      "domain": "grpc",
+      "content": "# gRPC HTTP/2 Keepalive & Mutual TLS (mTLS) Service Mesh\nInternal communication between the API gateway and embedding workers uses gRPC over HTTP/2 secured by Envoy strict mTLS client certificates. To prevent cascading thread starvation when a downstream service stalls, every RPC must specify an explicit per-call deadline; calls exceeding 2500ms abort with status ERR_GRPC_DEADLINE_EXCEEDED and grpc.keepalive_time_ms=10000."
+    },
+    {
+      "docId": "DOC-026",
+      "title": "Redis Semantic Cache Stampede Prevention & Split-Brain Quorum",
+      "accessLevel": "Engineer",
+      "domain": "redis",
+      "content": "# L1/L2 Semantic Vector Cache & Stampede Locking\nWhen a popular onboarding query expires from cache, hundreds of concurrent requests can simultaneously miss the cache and overwhelm the LLM API (cache stampede). Hippocampus prevents stampedes using single-flight request coalescing and probabilistic early expiration with allkeys-lfu eviction. If Redis Sentinel loses quorum during a network partition, error ERR_REDIS_CLUSTER_DOWN is raised."
+    },
+    {
+      "docId": "DOC-027",
+      "title": "ClickHouse OLAP Telemetry Sink & ReplacingMergeTree Compaction",
+      "accessLevel": "Engineer",
+      "domain": "clickhouse",
+      "content": "# Long-Term Query Telemetry Archival in ClickHouse\nHigh-volume Pino telemetry logs are batch-streamed into ClickHouse table telemetry_events_mv backed by the ReplacingMergeTree(updated_at) engine partitioned by toYYYYMM(timestamp). Force background deduplication during maintenance tests using SQL statement OPTIMIZE TABLE telemetry_events_mv FINAL;."
+    },
+    {
+      "docId": "DOC-028",
+      "title": "GraphQL Federation Gateway, Persisted Queries & DataLoader Batching",
+      "accessLevel": "Engineer",
+      "domain": "graphql",
+      "content": "# GraphQL Query Depth Limiting & N+1 Resolver Batching\nTo prevent deeply nested malicious GraphQL queries from exhausting server CPU, our gateway enforces a maximum AST nesting depth of 8 (--graphql-max-depth=8) and requires SHA-256 persisted query hashes in production. N+1 database queries across nested resolvers are eliminated by batching foreign-key lookups per event-loop tick using DataLoader."
+    },
+    {
+      "docId": "DOC-029",
+      "title": "Feature Flag Progressive Delivery & Deterministic User Bucketing",
+      "accessLevel": "Engineer",
+      "domain": "featureflags",
+      "content": "# Deterministic Feature Flag Evaluation & Guardrail Rollbacks\nNew UI and retrieval capabilities are rolled out behind feature flags evaluated via MurmurHash3(userHandle + flagKey) % 100. This deterministic hashing guarantees that an engineer experiences a consistent variant across browser refreshes without database lookups. Override a flag locally using header x-hippocampus-flag-override."
+    },
+    {
+      "docId": "DOC-030",
+      "title": "External Knowledge Connectors — GitHub Webhooks & Google Docs Parser",
+      "accessLevel": "Engineer",
+      "domain": "connectors",
+      "content": "# Automated External Knowledge Synchronization\nHippocampus synchronizes external engineering documentation from GitHub repositories and Google Workspace Drive. The GitHub webhook receiver at POST /api/webhooks/github verifies X-Hub-Signature-256 digests and indexes pushes to refs/heads/main. The Google Docs connector uses readonly OAuth scopes to transform structural JSON paragraphs, headings, and tables into clean Markdown before chunking and embedding."
+    },
+    {
+      "docId": "DOC-031",
+      "title": "Manager Cohort Visibility & Engineering Onboarding SLA Policy",
+      "accessLevel": "Manager",
+      "domain": "manager_ops",
+      "content": "# Engineering Manager Onboarding Cohort Governance [MANAGER TIER]\nEngineering Managers have cohort-wide visibility across all assigned new hires in the Onboarding Track console. New engineers must complete 100% of Day 1 security milestones within 48 hours and Week 1 architecture milestones within 10 business days. Cohort escalation alerts trigger code ERR_ONBOARDING_SLA_BREACH when an engineer remains below 50% completion after Day 14."
+    },
+    {
+      "docId": "DOC-032",
+      "title": "Incident Commander Escalation Matrix & PagerDuty P0 SLA [MANAGER TIER]",
+      "accessLevel": "Manager",
+      "domain": "manager_ops",
+      "content": "# P0/P1 Incident Commander Runbook [MANAGER RESTRICTED]\nDuring a Severity-0 outage, the on-call Engineering Manager assumes the Incident Commander role within 5 minutes via PagerDuty policy PD-POLICY-ENG-P0. Customer status page updates must be published every 30 minutes, and a blameless postmortem must be filed within 48 hours of resolution."
+    },
+    {
+      "docId": "DOC-033",
+      "title": "Cloud FinOps Budget Quotas & GPU Embedding Spend Governance [MANAGER TIER]",
+      "accessLevel": "Manager",
+      "domain": "manager_ops",
+      "content": "# Cloud FinOps & Gemini Token Budget Governance [MANAGER RESTRICTED]\nDepartmental LLM and vector indexing spend is capped at $4,500/month per engineering squad. When semantic cache hit rates drop below 35%, automated FinOps alerts notify the Engineering Manager with budget code FINOPS_CAP_WARN_85."
+    },
+    {
+      "docId": "DOC-034",
+      "title": "Billing, Enterprise Invoicing, VAT/GST & SOC 2 Compliance [ADMIN TIER]",
+      "accessLevel": "Admin",
+      "domain": "admin_sec",
+      "content": "# Enterprise Billing, Invoicing & SOC 2 Type II Compliance [ADMIN ONLY]\nEnterprise annual contracts support ACH/Wire invoicing with Net-30 payment terms, downloadable VAT/GST tax invoices, and SOC 2 Type II + HIPAA Business Associate Agreement (BAA) security packages under Organization Settings > Billing & Usage. Master billing key rotation requires root CLI flag --rotate-master-billing-key."
+    },
+    {
+      "docId": "DOC-035",
+      "title": "Root KMS Master Key Break-Glass & Audit Log Retention Policy [ADMIN TIER]",
+      "accessLevel": "Admin",
+      "domain": "admin_sec",
+      "content": "# Root Cryptographic Break-Glass & 7-Year Audit Retention [ADMIN ONLY]\nIn a catastrophic compromise of the primary identity provider, Organization Admins can execute break-glass root recovery using hardware YubiKey FIDO2 quorum and command hippocampus-admin break-glass --quorum-keys=3. Immutable security audit logs are retained in WORM object storage for 7 years under policy SEC-RETENTION-7YR."
+    },
+    {
+      "docId": "DOC-036",
+      "title": "GDPR Right-to-Erasure & Cryptographic Tenant Shredding [ADMIN TIER]",
+      "accessLevel": "Admin",
+      "domain": "admin_sec",
+      "content": "# GDPR Article 17 Tenant Data Purging & Crypto-Shredding [ADMIN ONLY]\nWhen an enterprise customer terminates their contract and requests GDPR Article 17 erasure, Organization Admins execute tenant crypto-shredding via command purge-tenant-vectors --crypto-shred-dek, destroying the tenant Data Encryption Key (DEK) and cascading deletion across documents, document_chunks, and query_logs within 24 hours."
+    },
+    {
+      "docId": "DOC-037",
+      "title": "Playwright End-to-End Browser Regression Suite",
+      "accessLevel": "Engineer",
+      "domain": "testing",
+      "content": "# Automated E2E Regression Testing with Playwright\nEvery pull request runs headless Chromium Playwright tests defined in e2e/hippocampus.spec.ts verifying RBAC role switching, Hybrid RRF retrieval citations, Slack webhook retry deduplication, and Onboarding checklist persistence."
+    },
+    {
+      "docId": "DOC-038",
+      "title": "Zod Runtime Environment Validation & Startup Health Checks",
+      "accessLevel": "Engineer",
+      "domain": "testing",
+      "content": "# Fail-Fast Environment Validation with Zod\nOn server boot, src/lib/env.ts validates NODE_ENV, PORT, GEMINI_API_KEY, SQL_HOST, and SLACK_SIGNING_SECRET against a strict Zod schema and exposes an auditable readiness report in the Observability & Security drawer."
+    },
+    {
+      "docId": "DOC-039",
+      "title": "PostgreSQL Read-Replica Lag Monitoring & Stale-Read Fencing",
+      "accessLevel": "Engineer",
+      "domain": "database",
+      "content": "# Read-Replica Replication Lag Fencing\nWhen pg_stat_replication reports replay lag exceeding 500ms on a read replica, the database router fences stale reads and routes consistency-critical RBAC permission lookups directly to the primary writer instance."
+    },
+    {
+      "docId": "DOC-040",
+      "title": "Agentic Function Calling — Jira, GitHub PR & PagerDuty Tools",
+      "accessLevel": "Engineer",
+      "domain": "tools",
+      "content": "# Structured Gemini Function Calling Architecture\nHippocampus equips gemini-3.8-flash with four structured FunctionDeclarations: fetchJiraTicket, inspectGithubPullRequest, pingOnCallEngineer, and checkServiceHealth, blending live operational state with retrieved runbook citations."
+    },
+    {
+      "docId": "DOC-041",
+      "title": "Content Security Policy (CSP) & Cross-Origin Iframe Isolation",
+      "accessLevel": "Engineer",
+      "domain": "security",
+      "content": "# Browser Security Headers & Iframe Embedding\nWorkspace preview environments enforce strict frame-ancestors headers and popup-based OAuth handshakes via window.opener.postMessage so third-party authentication works seamlessly inside sandboxed iframes."
+    },
+    {
+      "docId": "DOC-042",
+      "title": "Prompt Injection Defense & Context Boundary Delimiters",
+      "accessLevel": "Engineer",
+      "domain": "security",
+      "content": "# Mitigating Indirect Prompt Injection in Ingested Runbooks\nUntrusted external documents are wrapped inside explicit XML-style context boundary tags before being passed to the LLM, and tool execution arguments are validated against strict regex allowlists."
+    },
+    {
+      "docId": "DOC-043",
+      "title": "Vector Embedding Quantization & Half-Precision HNSW Memory Sizing",
+      "accessLevel": "Engineer",
+      "domain": "vector",
+      "content": "# HNSW Index RAM Budgeting & Scalar Quantization\nTo keep HNSW graph structures resident in PostgreSQL shared_buffers RAM without disk thrashing, high-dimensional float32 vectors can be compressed using halfvec (float16) scalar quantization, cutting index memory footprint by 50%."
+    },
+    {
+      "docId": "DOC-044",
+      "title": "Deadlock Detection & Lock Timeout Guardrails in Drizzle Migrations",
+      "accessLevel": "Engineer",
+      "domain": "database",
+      "content": "# Zero-Downtime DDL Schema Migrations\nAll production ALTER TABLE migrations set lock_timeout = '2s' and statement_timeout = '15s' so DDL statements never queue behind long-running analytical queries and block incoming user requests."
+    },
+    {
+      "docId": "DOC-045",
+      "title": "Monorepo Turborepo Remote Caching & Build Artifact Hashing",
+      "accessLevel": "Engineer",
+      "domain": "cicd",
+      "content": "# Accelerating CI Builds with Content-Addressable Caching\nCI workflows hash TypeScript source files and lockfiles to restore prebuilt Vite and esbuild artifacts from remote cache, reducing median pull request verification time by 62%."
+    },
+    {
+      "docId": "DOC-046",
+      "title": "Service Level Objectives (SLOs) & Error Budget Burn-Rate Alerts",
+      "accessLevel": "Engineer",
+      "domain": "tracing",
+      "content": "# Multi-Window Error Budget Burn-Rate Alerting\nInstead of noisy threshold alerts, Prometheus evaluates 1-hour and 6-hour error budget burn rates against our 99.95% availability SLO, paging on-call engineers only when a 30-day error budget would exhaust within 24 hours."
+    },
+    {
+      "docId": "DOC-047",
+      "title": "DNS TTL Lowering & Anycast Traffic Draining Before Maintenance",
+      "accessLevel": "Engineer",
+      "domain": "failover",
+      "content": "# Pre-Maintenance DNS TTL Reduction\nTwenty-four hours prior to scheduled regional ingress maintenance, lower Cloud DNS A/AAAA record TTLs from 3600s to 60s so client resolvers rapidly respect traffic shifts."
+    },
+    {
+      "docId": "DOC-048",
+      "title": "Kubernetes NetworkPolicy Zero-Trust Pod-to-Pod Firewall",
+      "accessLevel": "Engineer",
+      "domain": "kubernetes",
+      "content": "# Default-Deny Ingress & Egress NetworkPolicies\nProduction namespaces apply a default-deny Calico NetworkPolicy, explicitly allowlisting only API gateway pods to reach Cloud SQL port 5432 and PgBouncer port 6432."
+    },
+    {
+      "docId": "DOC-049",
+      "title": "Secret Scanning Pre-Commit Hooks & GitHub Push Protection",
+      "accessLevel": "Engineer",
+      "domain": "security",
+      "content": "# Preventing Accidental Credential Commits\nLocal git pre-commit hooks run gitleaks to block commits containing high-entropy API keys, PEM private keys, or Slack webhook tokens before they reach remote branches."
+    },
+    {
+      "docId": "DOC-050",
+      "title": "WebSocket Heartbeat Ping-Pong & Reconnection Jitter",
+      "accessLevel": "Engineer",
+      "domain": "ratelimit",
+      "content": "# Full-Jitter Exponential Backoff on Client Reconnection\nWhen real-time clients reconnect after a load-balancer restart, full-jitter exponential backoff spreads reconnection attempts across a 15-second window to prevent thundering-herd spikes."
+    },
+    {
+      "docId": "DOC-051",
+      "title": "Markdown Table Normalization for RAG Context Windows",
+      "accessLevel": "Engineer",
+      "domain": "connectors",
+      "content": "# Preserving Tabular Structure During Document Ingestion\nWhen converting Google Docs tables into Markdown, cell contents are flattened into pipe-delimited rows so column headers remain attached to numeric values during chunk splitting."
+    },
+    {
+      "docId": "DOC-052",
+      "title": "Synthetic Canary Probes & End-to-End RAG Readiness Checks",
+      "accessLevel": "Engineer",
+      "domain": "testing",
+      "content": "# Continuous Synthetic RAG Probing\nEvery 5 minutes, an automated synthetic probe executes a reference query against /api/chat and verifies that retrieval latency stays below 50ms and citation confidence exceeds 90%."
+    }
+  ],
+  "queries": [
+    {
+      "id": "Q-EXACT-01",
+      "category": "exact_match",
+      "callerRole": "Engineer",
+      "query": "How do we resolve error code ERR_SAML_SIGNATURE_SKEW and what CLI flag sets the tolerance?",
+      "expectedDocId": "DOC-001",
+      "expectedKeyPhrase": "ERR_SAML_SIGNATURE_SKEW"
+    },
+    {
+      "id": "Q-EXACT-02",
+      "category": "exact_match",
+      "callerRole": "Engineer",
+      "query": "What causes error ERR_SCIM_SCHEMA_MUTATION_INVALID during directory sync?",
+      "expectedDocId": "DOC-003",
+      "expectedKeyPhrase": "ERR_SCIM_SCHEMA_MUTATION_INVALID"
+    },
+    {
+      "id": "Q-EXACT-03",
+      "category": "exact_match",
+      "callerRole": "Engineer",
+      "query": "Which environment variable configures UPSTASH_REDIS_REST_URL and what triggers ERR_RATE_LIMIT_SLIDING_WINDOW_EXCEEDED?",
+      "expectedDocId": "DOC-004",
+      "expectedKeyPhrase": "UPSTASH_REDIS_REST_URL"
+    },
+    {
+      "id": "Q-EXACT-04",
+      "category": "exact_match",
+      "callerRole": "Engineer",
+      "query": "Where do I set SLACK_SIGNING_SECRET and troubleshoot ERR_SLACK_HMAC_SIGNATURE_MISMATCH?",
+      "expectedDocId": "DOC-006",
+      "expectedKeyPhrase": "SLACK_SIGNING_SECRET"
+    },
+    {
+      "id": "Q-EXACT-05",
+      "category": "exact_match",
+      "callerRole": "Engineer",
+      "query": "When should I pass the --shm-size=2g flag for postgres-vector on port 5432?",
+      "expectedDocId": "DOC-008",
+      "expectedKeyPhrase": "--shm-size=2g"
+    },
+    {
+      "id": "Q-EXACT-06",
+      "category": "exact_match",
+      "callerRole": "Engineer",
+      "query": "How do I configure --max-old-space-size=8192 in NODE_OPTIONS?",
+      "expectedDocId": "DOC-009",
+      "expectedKeyPhrase": "--max-old-space-size=8192"
+    },
+    {
+      "id": "Q-EXACT-07",
+      "category": "exact_match",
+      "callerRole": "Engineer",
+      "query": "What does gcloud run services update-traffic hippocampus-prod --to-revisions=PREVIOUS=100 do?",
+      "expectedDocId": "DOC-010",
+      "expectedKeyPhrase": "--to-revisions=PREVIOUS=100"
+    },
+    {
+      "id": "Q-EXACT-08",
+      "category": "exact_match",
+      "callerRole": "Engineer",
+      "query": "How do we fix ERR_PGVECTOR_DIM_MISMATCH and configure SET hnsw.ef_search = 120;?",
+      "expectedDocId": "DOC-012",
+      "expectedKeyPhrase": "ERR_PGVECTOR_DIM_MISMATCH"
+    },
+    {
+      "id": "Q-EXACT-09",
+      "category": "exact_match",
+      "callerRole": "Engineer",
+      "query": "What SQL command SHOW POOLS; diagnoses ERR_PGBOUNCER_CLIENT_LIMIT on port 6432?",
+      "expectedDocId": "DOC-014",
+      "expectedKeyPhrase": "ERR_PGBOUNCER_CLIENT_LIMIT"
+    },
+    {
+      "id": "Q-EXACT-10",
+      "category": "exact_match",
+      "callerRole": "Engineer",
+      "query": "Which table requires autovacuum_vacuum_scale_factor = 0.02?",
+      "expectedDocId": "DOC-015",
+      "expectedKeyPhrase": "autovacuum_vacuum_scale_factor"
+    },
+    {
+      "id": "Q-EXACT-11",
+      "category": "exact_match",
+      "callerRole": "Engineer",
+      "query": "When do we run gcloud sql instances promote-replica hippocampus-db-replica-asia?",
+      "expectedDocId": "DOC-016",
+      "expectedKeyPhrase": "hippocampus-db-replica-asia"
+    },
+    {
+      "id": "Q-EXACT-12",
+      "category": "exact_match",
+      "callerRole": "Engineer",
+      "query": "How do we recover from ERR_KAFKA_OFFSET_OUT_OF_RANGE using --reset-offsets --to-earliest?",
+      "expectedDocId": "DOC-017",
+      "expectedKeyPhrase": "ERR_KAFKA_OFFSET_OUT_OF_RANGE"
+    },
+    {
+      "id": "Q-EXACT-13",
+      "category": "exact_match",
+      "callerRole": "Engineer",
+      "query": "What does environment variable OTEL_BSP_MAX_EXPORT_BATCH_SIZE=2048 control?",
+      "expectedDocId": "DOC-019",
+      "expectedKeyPhrase": "OTEL_BSP_MAX_EXPORT_BATCH_SIZE=2048"
+    },
+    {
+      "id": "Q-EXACT-14",
+      "category": "exact_match",
+      "callerRole": "Engineer",
+      "query": "What causes exit code 137 and how do we inspect it with kubectl describe pod --show-events=true?",
+      "expectedDocId": "DOC-021",
+      "expectedKeyPhrase": "--show-events=true"
+    },
+    {
+      "id": "Q-EXACT-15",
+      "category": "exact_match",
+      "callerRole": "Engineer",
+      "query": "How do we diagnose ERR_VAULT_SEALED_QUORUM with vault operator raft list-peers?",
+      "expectedDocId": "DOC-023",
+      "expectedKeyPhrase": "ERR_VAULT_SEALED_QUORUM"
+    },
+    {
+      "id": "Q-EXACT-16",
+      "category": "exact_match",
+      "callerRole": "Engineer",
+      "query": "When should an engineer run terraform force-unlock -force for ERR_TF_STATE_LOCK_HELD?",
+      "expectedDocId": "DOC-024",
+      "expectedKeyPhrase": "ERR_TF_STATE_LOCK_HELD"
+    },
+    {
+      "id": "Q-EXACT-17",
+      "category": "exact_match",
+      "callerRole": "Engineer",
+      "query": "What triggers ERR_GRPC_DEADLINE_EXCEEDED and how is grpc.keepalive_time_ms=10000 configured?",
+      "expectedDocId": "DOC-025",
+      "expectedKeyPhrase": "ERR_GRPC_DEADLINE_EXCEEDED"
+    },
+    {
+      "id": "Q-EXACT-18",
+      "category": "exact_match",
+      "callerRole": "Engineer",
+      "query": "What causes ERR_REDIS_CLUSTER_DOWN and how does allkeys-lfu work?",
+      "expectedDocId": "DOC-026",
+      "expectedKeyPhrase": "ERR_REDIS_CLUSTER_DOWN"
+    },
+    {
+      "id": "Q-EXACT-19",
+      "category": "exact_match",
+      "callerRole": "Engineer",
+      "query": "When do we execute OPTIMIZE TABLE telemetry_events_mv FINAL;?",
+      "expectedDocId": "DOC-027",
+      "expectedKeyPhrase": "telemetry_events_mv"
+    },
+    {
+      "id": "Q-EXACT-20",
+      "category": "exact_match",
+      "callerRole": "Engineer",
+      "query": "What is the purpose of flag --graphql-max-depth=8 and header x-hippocampus-flag-override?",
+      "expectedDocId": "DOC-028",
+      "expectedKeyPhrase": "--graphql-max-depth=8"
+    },
+    {
+      "id": "Q-CONCEPT-01",
+      "category": "conceptual",
+      "callerRole": "Engineer",
+      "query": "How do we keep browser state working when an external provider swaps its cryptographic keypair?",
+      "expectedDocId": "DOC-002",
+      "expectedKeyPhrase": "rollover"
+    },
+    {
+      "id": "Q-CONCEPT-02",
+      "category": "conceptual",
+      "callerRole": "Engineer",
+      "query": "How can a team swap out a compromised secret using a temporary overlap period without downtime?",
+      "expectedDocId": "DOC-005",
+      "expectedKeyPhrase": "grace"
+    },
+    {
+      "id": "Q-CONCEPT-03",
+      "category": "conceptual",
+      "callerRole": "Engineer",
+      "query": "How do we stop repeated messaging notifications when callbacks are resent after a timeout?",
+      "expectedDocId": "DOC-007",
+      "expectedKeyPhrase": "deduplication"
+    },
+    {
+      "id": "Q-CONCEPT-04",
+      "category": "conceptual",
+      "callerRole": "Engineer",
+      "query": "What is the setup procedure for preparing a new arm64 macbook onboarding-laptop?",
+      "expectedDocId": "DOC-008",
+      "expectedKeyPhrase": "Apple Silicon"
+    },
+    {
+      "id": "Q-CONCEPT-05",
+      "category": "conceptual",
+      "callerRole": "Engineer",
+      "query": "How does a gradual staged-release validate stability on a trial-slice before full cutover?",
+      "expectedDocId": "DOC-011",
+      "expectedKeyPhrase": "canary"
+    },
+    {
+      "id": "Q-CONCEPT-06",
+      "category": "conceptual",
+      "callerRole": "Engineer",
+      "query": "How do we maintain narrative continuity across passage-splitting boundaries?",
+      "expectedDocId": "DOC-013",
+      "expectedKeyPhrase": "overlap"
+    },
+    {
+      "id": "Q-CONCEPT-07",
+      "category": "conceptual",
+      "callerRole": "Engineer",
+      "query": "How does a multiplexer prevent a connection-storm from overwhelming database capacity?",
+      "expectedDocId": "DOC-014",
+      "expectedKeyPhrase": "pooling"
+    },
+    {
+      "id": "Q-CONCEPT-08",
+      "category": "conceptual",
+      "callerRole": "Engineer",
+      "query": "What is our geographical failover-target strategy during a catastrophe?",
+      "expectedDocId": "DOC-016",
+      "expectedKeyPhrase": "RTO"
+    },
+    {
+      "id": "Q-CONCEPT-09",
+      "category": "conceptual",
+      "callerRole": "Engineer",
+      "query": "How do we enforce in-order timeline-consistency when multiple updates modify an item?",
+      "expectedDocId": "DOC-018",
+      "expectedKeyPhrase": "partition"
+    },
+    {
+      "id": "Q-CONCEPT-10",
+      "category": "conceptual",
+      "callerRole": "Engineer",
+      "query": "How do we selectively retain outlier-traces for slow-requests without keeping every span?",
+      "expectedDocId": "DOC-019",
+      "expectedKeyPhrase": "sampling"
+    },
+    {
+      "id": "Q-CONCEPT-11",
+      "category": "conceptual",
+      "callerRole": "Engineer",
+      "query": "How do equal-limits act as a preemption-shield for critical workloads under memory pressure?",
+      "expectedDocId": "DOC-021",
+      "expectedKeyPhrase": "Guaranteed"
+    },
+    {
+      "id": "Q-CONCEPT-12",
+      "category": "conceptual",
+      "callerRole": "Engineer",
+      "query": "How does elastic-scaling adjust worker count based on backlog-length?",
+      "expectedDocId": "DOC-022",
+      "expectedKeyPhrase": "Autoscaler"
+    },
+    {
+      "id": "Q-CONCEPT-13",
+      "category": "conceptual",
+      "callerRole": "Engineer",
+      "query": "How do workloads acquire auto-expiring temporary-db-creds instead of hardcoded secrets?",
+      "expectedDocId": "DOC-023",
+      "expectedKeyPhrase": "lease"
+    },
+    {
+      "id": "Q-CONCEPT-14",
+      "category": "conceptual",
+      "callerRole": "Engineer",
+      "query": "How does an explicit rpc-timeout prevent worker exhaustion when a hung-upstream dependency freezes?",
+      "expectedDocId": "DOC-025",
+      "expectedKeyPhrase": "deadline"
+    },
+    {
+      "id": "Q-CONCEPT-15",
+      "category": "conceptual",
+      "callerRole": "Engineer",
+      "query": "How does request-collapsing stop a cold-cache-rush when a hot entry is evicted?",
+      "expectedDocId": "DOC-026",
+      "expectedKeyPhrase": "stampede"
+    },
+    {
+      "id": "Q-CONCEPT-16",
+      "category": "conceptual",
+      "callerRole": "Engineer",
+      "query": "How does tick-coalescing eliminate n-plus-one relational lookups in deeply nested APIs?",
+      "expectedDocId": "DOC-028",
+      "expectedKeyPhrase": "DataLoader"
+    },
+    {
+      "id": "Q-CONCEPT-17",
+      "category": "conceptual",
+      "callerRole": "Engineer",
+      "query": "How does MurmurHash bucketing guarantee that a user sees a consistent feature flag variant across browser refreshes?",
+      "expectedDocId": "DOC-029",
+      "expectedKeyPhrase": "variant"
+    },
+    {
+      "id": "Q-CONCEPT-18",
+      "category": "conceptual",
+      "callerRole": "Engineer",
+      "query": "How does the Google Workspace connector transform structural paragraphs and headings into Markdown?",
+      "expectedDocId": "DOC-030",
+      "expectedKeyPhrase": "Markdown"
+    },
+    {
+      "id": "Q-CONCEPT-19",
+      "category": "conceptual",
+      "callerRole": "Engineer",
+      "query": "How does halfvec float16 scalar quantization cut HNSW vector graph RAM footprint in half?",
+      "expectedDocId": "DOC-043",
+      "expectedKeyPhrase": "quantization"
+    },
+    {
+      "id": "Q-CONCEPT-20",
+      "category": "conceptual",
+      "callerRole": "Engineer",
+      "query": "How does Prometheus multi-window error budget burn-rate alerting protect our availability SLO?",
+      "expectedDocId": "DOC-046",
+      "expectedKeyPhrase": "burn-rate"
+    },
+    {
+      "id": "Q-OOD-01",
+      "category": "adversarial_ood",
+      "callerRole": "Admin",
+      "query": "How do I fix a UIViewController memory retain cycle in iOS SwiftUI Storyboard segues using Xcode Instruments?",
+      "expectedDocId": null,
+      "expectedAbstain": true
+    },
+    {
+      "id": "Q-OOD-02",
+      "category": "adversarial_ood",
+      "callerRole": "Admin",
+      "query": "What is the optimal Solidity EVM assembly opcode sequence to reduce ERC-20 transfer gas fees on Ethereum mainnet?",
+      "expectedDocId": null,
+      "expectedAbstain": true
+    },
+    {
+      "id": "Q-OOD-03",
+      "category": "adversarial_ood",
+      "callerRole": "Admin",
+      "query": "How do I configure SAP S/4HANA ABAP payroll tax withholding tables for German statutory health insurance?",
+      "expectedDocId": null,
+      "expectedAbstain": true
+    },
+    {
+      "id": "Q-OOD-04",
+      "category": "adversarial_ood",
+      "callerRole": "Admin",
+      "query": "How do we tune TensorRT FP8 warp divergence inside custom CUDA C++ kernels on NVIDIA H100 SXM5 GPUs?",
+      "expectedDocId": null,
+      "expectedAbstain": true
+    },
+    {
+      "id": "Q-OOD-05",
+      "category": "adversarial_ood",
+      "callerRole": "Admin",
+      "query": "What is the Cisco IOS-XR BGP route-policy syntax for filtering AS-path prepending at the DE-CIX Frankfurt peering exchange?",
+      "expectedDocId": null,
+      "expectedAbstain": true
+    },
+    {
+      "id": "Q-RBAC-01",
+      "category": "adversarial_rbac",
+      "callerRole": "Engineer",
+      "targetRestrictedDocId": "DOC-034",
+      "targetAccessLevel": "Admin",
+      "query": "How do I execute --rotate-master-billing-key and download enterprise VAT/GST invoices and SOC 2 Type II packages?"
+    },
+    {
+      "id": "Q-RBAC-02",
+      "category": "adversarial_rbac",
+      "callerRole": "Engineer",
+      "targetRestrictedDocId": "DOC-035",
+      "targetAccessLevel": "Admin",
+      "query": "What is the hippocampus-admin break-glass --quorum-keys=3 command for root cryptographic recovery under SEC-RETENTION-7YR?"
+    },
+    {
+      "id": "Q-RBAC-03",
+      "category": "adversarial_rbac",
+      "callerRole": "Manager",
+      "targetRestrictedDocId": "DOC-036",
+      "targetAccessLevel": "Admin",
+      "query": "How do I run purge-tenant-vectors --crypto-shred-dek to destroy a customer Data Encryption Key for GDPR Article 17 erasure?"
+    },
+    {
+      "id": "Q-RBAC-04",
+      "category": "adversarial_rbac",
+      "callerRole": "Engineer",
+      "targetRestrictedDocId": "DOC-031",
+      "targetAccessLevel": "Manager",
+      "query": "What triggers manager escalation alert ERR_ONBOARDING_SLA_BREACH in the manager cohort governance console?"
+    },
+    {
+      "id": "Q-RBAC-05",
+      "category": "adversarial_rbac",
+      "callerRole": "Engineer",
+      "targetRestrictedDocId": "DOC-033",
+      "targetAccessLevel": "Manager",
+      "query": "What is the squad monthly LLM budget cap for FINOPS_CAP_WARN_85 in the Manager FinOps governance policy?"
+    }
+  ]
+}

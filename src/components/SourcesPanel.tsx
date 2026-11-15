@@ -2,21 +2,24 @@ import React, { useCallback, useState } from 'react';
 import {
   FileText,
   Globe,
+  Lock,
   MessageSquare,
   Plus,
   Search,
   Trash2,
   UploadCloud,
 } from 'lucide-react';
-import { IndexedDocument } from '../types/app.ts';
+import { IndexedDocument, RbacRole } from '../types/app.ts';
 
 interface SourcesPanelProps {
   documents: IndexedDocument[];
   loading: boolean;
+  activeRole: RbacRole;
   onIngestDocument: (payload: {
     title: string;
     sourceType: 'file' | 'url' | 'slack';
     sourceUrl?: string;
+    accessLevel?: RbacRole;
     content: string;
   }) => Promise<void>;
   onDeleteDocument: (id: number) => Promise<void>;
@@ -25,11 +28,13 @@ interface SourcesPanelProps {
 export function SourcesPanel({
   documents,
   loading,
+  activeRole,
   onIngestDocument,
   onDeleteDocument,
 }: SourcesPanelProps) {
   const [title, setTitle] = useState('');
   const [sourceType, setSourceType] = useState<'file' | 'url' | 'slack'>('file');
+  const [accessLevel, setAccessLevel] = useState<RbacRole>('Engineer');
   const [sourceUrl, setSourceUrl] = useState('');
   const [content, setContent] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -38,12 +43,15 @@ export function SourcesPanel({
     text: string;
   } | null>(null);
 
-  const [filterType, setFilterType] = useState<'all' | 'file' | 'url' | 'slack'>(
-    'all'
-  );
+  const [filterType, setFilterType] = useState<
+    'all' | 'file' | 'url' | 'slack' | 'github' | 'gdrive'
+  >('all');
   const [searchTerm, setSearchTerm] = useState('');
   const [expandedDocId, setExpandedDocId] = useState<number | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+
+  const canIngest = activeRole === 'Admin' || activeRole === 'Manager';
+  const canDelete = activeRole === 'Admin';
 
   const handleFileRead = useCallback(
     async (file: File) => {
@@ -92,6 +100,13 @@ export function SourcesPanel({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!canIngest) {
+      setFeedback({
+        type: 'error',
+        text: 'RBAC Policy: Engineer role has read-only access. Switch to Manager or Admin to ingest documents.',
+      });
+      return;
+    }
     if (!title.trim() || !content.trim()) {
       setFeedback({
         type: 'error',
@@ -107,6 +122,7 @@ export function SourcesPanel({
         title: title.trim(),
         sourceType,
         sourceUrl: sourceUrl.trim() || undefined,
+        accessLevel,
         content: content.trim(),
       });
       setTitle('');
@@ -114,7 +130,7 @@ export function SourcesPanel({
       setContent('');
       setFeedback({
         type: 'success',
-        text: 'Document split into overlapping chunks, embedded via Gemini, and stored in PostgreSQL.',
+        text: `Document indexed under [${accessLevel}] RBAC tier and stored in PostgreSQL.`,
       });
     } catch (err: unknown) {
       setFeedback({
@@ -129,6 +145,21 @@ export function SourcesPanel({
     }
   };
 
+  const handleDeleteClick = async (docId: number) => {
+    setFeedback(null);
+    try {
+      await onDeleteDocument(docId);
+    } catch (err: unknown) {
+      setFeedback({
+        type: 'error',
+        text:
+          err instanceof Error
+            ? err.message
+            : 'Failed to delete document.',
+      });
+    }
+  };
+
   const filteredDocs = documents.filter((doc) => {
     const matchesType = filterType === 'all' || doc.sourceType === filterType;
     const matchesSearch =
@@ -139,6 +170,8 @@ export function SourcesPanel({
   });
 
   const formatSourceLabel = (type: string) => {
+    if (type === 'github') return 'GitHub Repo';
+    if (type === 'gdrive') return 'Google Drive';
     if (type === 'url') return 'URL Crawl';
     if (type === 'slack') return 'Slack Thread';
     return 'File Upload';
@@ -146,6 +179,25 @@ export function SourcesPanel({
 
   return (
     <div className="space-y-8">
+      {/* RBAC Visibility Notice */}
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/40 px-5 py-3 text-xs">
+        <div className="flex items-center gap-2 text-slate-300">
+          <Lock className="h-3.5 w-3.5 text-emerald-400" />
+          <span>
+            Active RBAC Clearance:{' '}
+            <strong className="font-mono text-white">{activeRole}</strong>
+          </span>
+          <span aria-hidden="true">·</span>
+          <span className="text-slate-400">
+            {activeRole === 'Admin'
+              ? 'Full visibility (Engineer, Manager & Admin tiers) + Ingestion & Deletion privileges'
+              : activeRole === 'Manager'
+                ? 'Manager visibility (Engineer & Manager tiers) + Ingestion privileges (Admin docs hidden)'
+                : 'Engineer visibility (Engineer tier only) · Read-only source access'}
+          </span>
+        </div>
+      </div>
+
       {/* Ingestion Form & Drag-and-Drop Zone */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
         <div className="lg:col-span-5 flex flex-col justify-between rounded-xl border border-slate-800 bg-slate-900/50 p-6">
@@ -194,7 +246,7 @@ export function SourcesPanel({
             <span className="mx-2" aria-hidden="true">
               ·
             </span>
-            <span>Storage: PostgreSQL</span>
+            <span>Storage: PostgreSQL + RBAC Policy</span>
           </div>
         </div>
 
@@ -202,7 +254,7 @@ export function SourcesPanel({
           onSubmit={handleSubmit}
           className="lg:col-span-7 rounded-xl border border-slate-800 bg-slate-900/50 p-6 space-y-4"
         >
-          <div className="flex items-center justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-2">
             <h2 className="font-display text-base font-semibold text-white">
               Ingest New Knowledge Source
             </h2>
@@ -229,8 +281,8 @@ export function SourcesPanel({
             </div>
           </div>
 
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <div>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <div className="sm:col-span-1">
               <label className="block text-xs font-medium text-slate-300 mb-1">
                 Document Title
               </label>
@@ -239,13 +291,13 @@ export function SourcesPanel({
                 required
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
-                placeholder="e.g. Kubernetes Incident Rollback Runbook"
+                placeholder="e.g. K8s Incident Rollback"
                 className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-white placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none"
               />
             </div>
-            <div>
+            <div className="sm:col-span-1">
               <label className="block text-xs font-medium text-slate-300 mb-1">
-                Source Reference (Optional URL or Channel)
+                Source Reference (Optional)
               </label>
               <input
                 type="text"
@@ -253,13 +305,39 @@ export function SourcesPanel({
                 onChange={(e) => setSourceUrl(e.target.value)}
                 placeholder={
                   sourceType === 'url'
-                    ? 'https://docs.internal/k8s-rollback'
+                    ? 'https://docs.internal/k8s'
                     : sourceType === 'slack'
                       ? 'slack://#eng-incidents'
-                      : 'docs://ops/k8s-rollback.md'
+                      : 'docs://ops/k8s.md'
                 }
                 className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-white placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none"
               />
+            </div>
+            <div className="sm:col-span-1">
+              <label className="block text-xs font-medium text-slate-300 mb-1">
+                RBAC Classification Tier
+              </label>
+              <div className="inline-flex w-full rounded-lg border border-slate-700 bg-slate-950 p-1">
+                {(['Engineer', 'Manager', 'Admin'] as const).map((tier) => {
+                  const disabledTier =
+                    tier === 'Admin' && activeRole !== 'Admin';
+                  return (
+                    <button
+                      key={tier}
+                      type="button"
+                      disabled={disabledTier}
+                      onClick={() => setAccessLevel(tier)}
+                      className={`flex-1 rounded px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap cursor-pointer disabled:opacity-40 ${
+                        accessLevel === tier
+                          ? 'bg-slate-800 text-emerald-400 font-semibold'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      {tier}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           </div>
 
@@ -290,14 +368,16 @@ export function SourcesPanel({
               </p>
             ) : (
               <span className="text-xs text-slate-400">
-                Chunks are immediately searchable in the RAG Playground and Slack Simulator.
+                {canIngest
+                  ? 'Chunks are immediately searchable by roles authorized for the selected classification tier.'
+                  : 'Read-only mode active for Engineer role. Switch to Manager or Admin in the top header to ingest.'}
               </span>
             )}
 
             <button
               type="submit"
-              disabled={submitting}
-              className="inline-flex items-center gap-2 rounded-lg bg-emerald-500 px-4 py-2 text-xs font-semibold text-slate-950 transition-colors hover:bg-emerald-400 disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer"
+              disabled={submitting || !canIngest}
+              className="inline-flex items-center gap-2 rounded-lg bg-emerald-500 px-4 py-2 text-xs font-semibold text-slate-950 transition-colors hover:bg-emerald-400 disabled:opacity-40 whitespace-nowrap shrink-0 cursor-pointer"
             >
               <Plus className="h-3.5 w-3.5" />
               {submitting
@@ -313,10 +393,11 @@ export function SourcesPanel({
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h2 className="font-display text-base font-semibold text-white">
-              Indexed Knowledge Base ({filteredDocs.length} sources)
+              Authorized Knowledge Base ({filteredDocs.length} sources visible to{' '}
+              {activeRole})
             </h2>
             <p className="text-xs text-slate-400">
-              Click any document row to inspect its indexed content excerpt.
+              Click any document row to inspect its indexed content excerpt and RBAC classification tier.
             </p>
           </div>
 
@@ -332,8 +413,10 @@ export function SourcesPanel({
               />
             </div>
 
-            <div className="inline-flex rounded-lg border border-slate-800 bg-slate-900 p-1">
-              {(['all', 'file', 'url', 'slack'] as const).map((tab) => (
+            <div className="inline-flex flex-wrap rounded-lg border border-slate-800 bg-slate-900 p-1">
+              {(
+                ['all', 'github', 'gdrive', 'file', 'url', 'slack'] as const
+              ).map((tab) => (
                 <button
                   key={tab}
                   type="button"
@@ -346,11 +429,15 @@ export function SourcesPanel({
                 >
                   {tab === 'all'
                     ? 'All'
-                    : tab === 'file'
-                      ? 'Files'
-                      : tab === 'url'
-                        ? 'URLs'
-                        : 'Slack'}
+                    : tab === 'github'
+                      ? 'GitHub'
+                      : tab === 'gdrive'
+                        ? 'Google Drive'
+                        : tab === 'file'
+                          ? 'Files'
+                          : tab === 'url'
+                            ? 'URLs'
+                            : 'Slack'}
                 </button>
               ))}
             </div>
@@ -358,11 +445,12 @@ export function SourcesPanel({
         </div>
 
         <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-900/40">
-          <table className="w-full min-w-[700px] text-left">
+          <table className="w-full min-w-[740px] text-left">
             <thead>
               <tr className="border-b border-slate-800 bg-slate-900/80 text-xs font-medium text-slate-400">
                 <th className="px-4 py-3">Document Title</th>
                 <th className="px-4 py-3">Source Type</th>
+                <th className="px-4 py-3">RBAC Tier</th>
                 <th className="px-4 py-3 text-right">Vector Chunks</th>
                 <th className="px-4 py-3">Ingestion State</th>
                 <th className="px-4 py-3 text-right">Date Indexed</th>
@@ -372,19 +460,20 @@ export function SourcesPanel({
             <tbody className="divide-y divide-slate-800/80 text-xs">
               {loading && documents.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="px-4 py-8 text-center text-slate-400">
+                  <td colSpan={7} className="px-4 py-8 text-center text-slate-400">
                     Loading indexed documents from PostgreSQL...
                   </td>
                 </tr>
               ) : filteredDocs.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="px-4 py-8 text-center text-slate-400">
-                    No matching knowledge sources found. Upload a document above to index it.
+                  <td colSpan={7} className="px-4 py-8 text-center text-slate-400">
+                    No matching knowledge sources found for {activeRole} clearance.
                   </td>
                 </tr>
               ) : (
                 filteredDocs.map((doc) => {
                   const isExpanded = expandedDocId === doc.id;
+                  const tier = doc.accessLevel || 'Engineer';
                   return (
                     <React.Fragment key={doc.id}>
                       <tr
@@ -408,6 +497,17 @@ export function SourcesPanel({
                         <td className="px-4 py-3 text-slate-300">
                           {formatSourceLabel(doc.sourceType)}
                         </td>
+                        <td
+                          className={`px-4 py-3 font-mono ${
+                            tier === 'Admin'
+                              ? 'text-amber-400'
+                              : tier === 'Manager'
+                                ? 'text-sky-400'
+                                : 'text-emerald-400'
+                          }`}
+                        >
+                          {tier}
+                        </td>
                         <td className="px-4 py-3 text-right font-mono text-slate-200 tabular-nums">
                           {doc.chunkCount}
                         </td>
@@ -427,9 +527,15 @@ export function SourcesPanel({
                         >
                           <button
                             type="button"
-                            onClick={() => onDeleteDocument(doc.id)}
+                            disabled={!canDelete}
+                            title={
+                              canDelete
+                                ? 'Remove document'
+                                : 'Only Admin role can delete indexed documents'
+                            }
+                            onClick={() => handleDeleteClick(doc.id)}
                             aria-label={`Delete ${doc.title}`}
-                            className="inline-flex items-center gap-1 rounded px-2 py-1 text-slate-400 transition-colors hover:bg-red-500/10 hover:text-red-400 cursor-pointer"
+                            className="inline-flex items-center gap-1 rounded px-2 py-1 text-slate-400 transition-colors hover:bg-red-500/10 hover:text-red-400 disabled:opacity-35 disabled:pointer-events-none cursor-pointer"
                           >
                             <Trash2 className="h-3.5 w-3.5" />
                             <span>Remove</span>
@@ -438,10 +544,11 @@ export function SourcesPanel({
                       </tr>
                       {isExpanded && (
                         <tr className="bg-slate-950/80">
-                          <td colSpan={6} className="px-6 py-4 space-y-2">
+                          <td colSpan={7} className="px-6 py-4 space-y-2">
                             <div className="flex items-center justify-between text-[11px] text-slate-400">
                               <span>
-                                Source URI: {doc.sourceUrl || 'Internal Upload'}
+                                Source URI: {doc.sourceUrl || 'Internal Upload'} ·
+                                Required Clearance: {tier}
                               </span>
                               <span>
                                 {doc.chunkCount} semantic vector chunk(s) stored

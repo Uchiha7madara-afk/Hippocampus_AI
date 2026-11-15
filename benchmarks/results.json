@@ -1,0 +1,423 @@
+{
+  "generatedAt": "2026-11-12T15:13:01.233Z",
+  "benchmarkMetadata": {
+    "corpusDocuments": 52,
+    "totalQueries": 50,
+    "exactMatchQueries": 20,
+    "conceptualQueries": 20,
+    "adversarialOodQueries": 5,
+    "adversarialRbacQueries": 5,
+    "rrfAlpha": 0.65,
+    "rrfK": 60,
+    "confidenceGateTau": 0.26,
+    "bm25Params": {
+      "k1": 1.5,
+      "b": 0.75
+    }
+  },
+  "regimeAblationAt512": [
+    {
+      "mode": "sparse_bm25",
+      "chunkConfig": "512/100",
+      "totalChunksIndexed": 56,
+      "exactMatchRecallAt5": 100,
+      "conceptualRecallAt5": 75,
+      "overallRecallAt3": 85,
+      "overallRecallAt5": 87.5,
+      "mrrAt5": 0.831,
+      "oodHallucinationRate": 100,
+      "rbacLeakageRate": 0,
+      "p50RetrievalLatencyMs": 28.86,
+      "p95RetrievalLatencyMs": 41.53,
+      "e2eSynthesisLatencySec": 1.23
+    },
+    {
+      "mode": "dense_vector",
+      "chunkConfig": "512/100",
+      "totalChunksIndexed": 56,
+      "exactMatchRecallAt5": 60,
+      "conceptualRecallAt5": 100,
+      "overallRecallAt3": 75,
+      "overallRecallAt5": 80,
+      "mrrAt5": 0.665,
+      "oodHallucinationRate": 100,
+      "rbacLeakageRate": 0,
+      "p50RetrievalLatencyMs": 28.68,
+      "p95RetrievalLatencyMs": 36.08,
+      "e2eSynthesisLatencySec": 1.22
+    },
+    {
+      "mode": "linear_sum",
+      "chunkConfig": "512/100",
+      "totalChunksIndexed": 56,
+      "exactMatchRecallAt5": 90,
+      "conceptualRecallAt5": 100,
+      "overallRecallAt3": 90,
+      "overallRecallAt5": 95,
+      "mrrAt5": 0.85,
+      "oodHallucinationRate": 100,
+      "rbacLeakageRate": 0,
+      "p50RetrievalLatencyMs": 38.14,
+      "p95RetrievalLatencyMs": 50.31,
+      "e2eSynthesisLatencySec": 1.24
+    },
+    {
+      "mode": "hybrid_rrf",
+      "chunkConfig": "512/100",
+      "totalChunksIndexed": 56,
+      "exactMatchRecallAt5": 100,
+      "conceptualRecallAt5": 100,
+      "overallRecallAt3": 100,
+      "overallRecallAt5": 100,
+      "mrrAt5": 0.917,
+      "oodHallucinationRate": 0,
+      "rbacLeakageRate": 0,
+      "p50RetrievalLatencyMs": 37.38,
+      "p95RetrievalLatencyMs": 51.97,
+      "e2eSynthesisLatencySec": 1.1
+    }
+  ],
+  "chunkGranularityAblationHybridRrf": [
+    {
+      "mode": "hybrid_rrf",
+      "chunkConfig": "256/50",
+      "totalChunksIndexed": 105,
+      "exactMatchRecallAt5": 100,
+      "conceptualRecallAt5": 100,
+      "overallRecallAt3": 100,
+      "overallRecallAt5": 100,
+      "mrrAt5": 0.871,
+      "oodHallucinationRate": 0,
+      "rbacLeakageRate": 0,
+      "p50RetrievalLatencyMs": 41.87,
+      "p95RetrievalLatencyMs": 49.49,
+      "e2eSynthesisLatencySec": 0.97
+    },
+    {
+      "mode": "hybrid_rrf",
+      "chunkConfig": "512/100",
+      "totalChunksIndexed": 56,
+      "exactMatchRecallAt5": 100,
+      "conceptualRecallAt5": 100,
+      "overallRecallAt3": 100,
+      "overallRecallAt5": 100,
+      "mrrAt5": 0.917,
+      "oodHallucinationRate": 0,
+      "rbacLeakageRate": 0,
+      "p50RetrievalLatencyMs": 33.37,
+      "p95RetrievalLatencyMs": 38.42,
+      "e2eSynthesisLatencySec": 1.1
+    },
+    {
+      "mode": "hybrid_rrf",
+      "chunkConfig": "1024/200",
+      "totalChunksIndexed": 52,
+      "exactMatchRecallAt5": 100,
+      "conceptualRecallAt5": 100,
+      "overallRecallAt3": 100,
+      "overallRecallAt5": 100,
+      "mrrAt5": 0.925,
+      "oodHallucinationRate": 0,
+      "rbacLeakageRate": 0,
+      "p50RetrievalLatencyMs": 32.28,
+      "p95RetrievalLatencyMs": 46.39,
+      "e2eSynthesisLatencySec": 1.29
+    }
+  ],
+  "fullGridResults": [
+    {
+      "mode": "sparse_bm25",
+      "chunkConfig": "256/50",
+      "totalChunksIndexed": 105,
+      "exactMatchRecallAt5": 100,
+      "conceptualRecallAt5": 65,
+      "overallRecallAt3": 80,
+      "overallRecallAt5": 82.5,
+      "mrrAt5": 0.744,
+      "oodHallucinationRate": 100,
+      "rbacLeakageRate": 0,
+      "p50RetrievalLatencyMs": 31.72,
+      "p95RetrievalLatencyMs": 40.31,
+      "e2eSynthesisLatencySec": 1.12
+    },
+    {
+      "mode": "dense_vector",
+      "chunkConfig": "256/50",
+      "totalChunksIndexed": 105,
+      "exactMatchRecallAt5": 65,
+      "conceptualRecallAt5": 100,
+      "overallRecallAt3": 75,
+      "overallRecallAt5": 82.5,
+      "mrrAt5": 0.6,
+      "oodHallucinationRate": 100,
+      "rbacLeakageRate": 0,
+      "p50RetrievalLatencyMs": 35.73,
+      "p95RetrievalLatencyMs": 45.5,
+      "e2eSynthesisLatencySec": 1.12
+    },
+    {
+      "mode": "linear_sum",
+      "chunkConfig": "256/50",
+      "totalChunksIndexed": 105,
+      "exactMatchRecallAt5": 90,
+      "conceptualRecallAt5": 100,
+      "overallRecallAt3": 85,
+      "overallRecallAt5": 95,
+      "mrrAt5": 0.77,
+      "oodHallucinationRate": 100,
+      "rbacLeakageRate": 0,
+      "p50RetrievalLatencyMs": 40.88,
+      "p95RetrievalLatencyMs": 46.99,
+      "e2eSynthesisLatencySec": 1.13
+    },
+    {
+      "mode": "hybrid_rrf",
+      "chunkConfig": "256/50",
+      "totalChunksIndexed": 105,
+      "exactMatchRecallAt5": 100,
+      "conceptualRecallAt5": 100,
+      "overallRecallAt3": 100,
+      "overallRecallAt5": 100,
+      "mrrAt5": 0.871,
+      "oodHallucinationRate": 0,
+      "rbacLeakageRate": 0,
+      "p50RetrievalLatencyMs": 41.87,
+      "p95RetrievalLatencyMs": 49.49,
+      "e2eSynthesisLatencySec": 0.97
+    },
+    {
+      "mode": "sparse_bm25",
+      "chunkConfig": "512/100",
+      "totalChunksIndexed": 56,
+      "exactMatchRecallAt5": 100,
+      "conceptualRecallAt5": 75,
+      "overallRecallAt3": 85,
+      "overallRecallAt5": 87.5,
+      "mrrAt5": 0.831,
+      "oodHallucinationRate": 100,
+      "rbacLeakageRate": 0,
+      "p50RetrievalLatencyMs": 24.02,
+      "p95RetrievalLatencyMs": 29.8,
+      "e2eSynthesisLatencySec": 1.22
+    },
+    {
+      "mode": "dense_vector",
+      "chunkConfig": "512/100",
+      "totalChunksIndexed": 56,
+      "exactMatchRecallAt5": 60,
+      "conceptualRecallAt5": 100,
+      "overallRecallAt3": 75,
+      "overallRecallAt5": 80,
+      "mrrAt5": 0.665,
+      "oodHallucinationRate": 100,
+      "rbacLeakageRate": 0,
+      "p50RetrievalLatencyMs": 30.04,
+      "p95RetrievalLatencyMs": 40.39,
+      "e2eSynthesisLatencySec": 1.23
+    },
+    {
+      "mode": "linear_sum",
+      "chunkConfig": "512/100",
+      "totalChunksIndexed": 56,
+      "exactMatchRecallAt5": 90,
+      "conceptualRecallAt5": 100,
+      "overallRecallAt3": 90,
+      "overallRecallAt5": 95,
+      "mrrAt5": 0.85,
+      "oodHallucinationRate": 100,
+      "rbacLeakageRate": 0,
+      "p50RetrievalLatencyMs": 33.7,
+      "p95RetrievalLatencyMs": 42.45,
+      "e2eSynthesisLatencySec": 1.23
+    },
+    {
+      "mode": "hybrid_rrf",
+      "chunkConfig": "512/100",
+      "totalChunksIndexed": 56,
+      "exactMatchRecallAt5": 100,
+      "conceptualRecallAt5": 100,
+      "overallRecallAt3": 100,
+      "overallRecallAt5": 100,
+      "mrrAt5": 0.917,
+      "oodHallucinationRate": 0,
+      "rbacLeakageRate": 0,
+      "p50RetrievalLatencyMs": 33.37,
+      "p95RetrievalLatencyMs": 38.42,
+      "e2eSynthesisLatencySec": 1.1
+    },
+    {
+      "mode": "sparse_bm25",
+      "chunkConfig": "1024/200",
+      "totalChunksIndexed": 52,
+      "exactMatchRecallAt5": 100,
+      "conceptualRecallAt5": 80,
+      "overallRecallAt3": 90,
+      "overallRecallAt5": 90,
+      "mrrAt5": 0.842,
+      "oodHallucinationRate": 100,
+      "rbacLeakageRate": 0,
+      "p50RetrievalLatencyMs": 23.47,
+      "p95RetrievalLatencyMs": 29.7,
+      "e2eSynthesisLatencySec": 1.43
+    },
+    {
+      "mode": "dense_vector",
+      "chunkConfig": "1024/200",
+      "totalChunksIndexed": 52,
+      "exactMatchRecallAt5": 60,
+      "conceptualRecallAt5": 100,
+      "overallRecallAt3": 75,
+      "overallRecallAt5": 80,
+      "mrrAt5": 0.69,
+      "oodHallucinationRate": 100,
+      "rbacLeakageRate": 0,
+      "p50RetrievalLatencyMs": 27.16,
+      "p95RetrievalLatencyMs": 32.98,
+      "e2eSynthesisLatencySec": 1.44
+    },
+    {
+      "mode": "linear_sum",
+      "chunkConfig": "1024/200",
+      "totalChunksIndexed": 52,
+      "exactMatchRecallAt5": 90,
+      "conceptualRecallAt5": 100,
+      "overallRecallAt3": 90,
+      "overallRecallAt5": 95,
+      "mrrAt5": 0.85,
+      "oodHallucinationRate": 100,
+      "rbacLeakageRate": 0,
+      "p50RetrievalLatencyMs": 31.18,
+      "p95RetrievalLatencyMs": 36.97,
+      "e2eSynthesisLatencySec": 1.44
+    },
+    {
+      "mode": "hybrid_rrf",
+      "chunkConfig": "1024/200",
+      "totalChunksIndexed": 52,
+      "exactMatchRecallAt5": 100,
+      "conceptualRecallAt5": 100,
+      "overallRecallAt3": 100,
+      "overallRecallAt5": 100,
+      "mrrAt5": 0.925,
+      "oodHallucinationRate": 0,
+      "rbacLeakageRate": 0,
+      "p50RetrievalLatencyMs": 32.28,
+      "p95RetrievalLatencyMs": 46.39,
+      "e2eSynthesisLatencySec": 1.29
+    }
+  ],
+  "failureAnalysisAt512": {
+    "sparse_bm25": [
+      {
+        "queryId": "Q-CONCEPT-06",
+        "category": "conceptual",
+        "expectedDocId": "DOC-013",
+        "topRetrievedDocId": "DOC-019",
+        "rankFound": null
+      },
+      {
+        "queryId": "Q-CONCEPT-07",
+        "category": "conceptual",
+        "expectedDocId": "DOC-014",
+        "topRetrievedDocId": "DOC-028",
+        "rankFound": null
+      },
+      {
+        "queryId": "Q-CONCEPT-08",
+        "category": "conceptual",
+        "expectedDocId": "DOC-016",
+        "topRetrievedDocId": "DOC-013",
+        "rankFound": null
+      },
+      {
+        "queryId": "Q-CONCEPT-10",
+        "category": "conceptual",
+        "expectedDocId": "DOC-019",
+        "topRetrievedDocId": "DOC-052",
+        "rankFound": null
+      },
+      {
+        "queryId": "Q-CONCEPT-15",
+        "category": "conceptual",
+        "expectedDocId": "DOC-026",
+        "topRetrievedDocId": "DOC-011",
+        "rankFound": null
+      }
+    ],
+    "dense_vector": [
+      {
+        "queryId": "Q-EXACT-01",
+        "category": "exact_match",
+        "expectedDocId": "DOC-001",
+        "topRetrievedDocId": "DOC-029",
+        "rankFound": null
+      },
+      {
+        "queryId": "Q-EXACT-03",
+        "category": "exact_match",
+        "expectedDocId": "DOC-004",
+        "topRetrievedDocId": "DOC-018",
+        "rankFound": null
+      },
+      {
+        "queryId": "Q-EXACT-04",
+        "category": "exact_match",
+        "expectedDocId": "DOC-006",
+        "topRetrievedDocId": "DOC-046",
+        "rankFound": null
+      },
+      {
+        "queryId": "Q-EXACT-05",
+        "category": "exact_match",
+        "expectedDocId": "DOC-008",
+        "topRetrievedDocId": "DOC-010",
+        "rankFound": null
+      },
+      {
+        "queryId": "Q-EXACT-10",
+        "category": "exact_match",
+        "expectedDocId": "DOC-015",
+        "topRetrievedDocId": "DOC-016",
+        "rankFound": null
+      },
+      {
+        "queryId": "Q-EXACT-11",
+        "category": "exact_match",
+        "expectedDocId": "DOC-016",
+        "topRetrievedDocId": "DOC-039",
+        "rankFound": null
+      },
+      {
+        "queryId": "Q-EXACT-12",
+        "category": "exact_match",
+        "expectedDocId": "DOC-017",
+        "topRetrievedDocId": "DOC-042",
+        "rankFound": null
+      },
+      {
+        "queryId": "Q-EXACT-13",
+        "category": "exact_match",
+        "expectedDocId": "DOC-019",
+        "topRetrievedDocId": "DOC-018",
+        "rankFound": null
+      }
+    ],
+    "linear_sum": [
+      {
+        "queryId": "Q-EXACT-05",
+        "category": "exact_match",
+        "expectedDocId": "DOC-008",
+        "topRetrievedDocId": "DOC-038",
+        "rankFound": null
+      },
+      {
+        "queryId": "Q-EXACT-12",
+        "category": "exact_match",
+        "expectedDocId": "DOC-017",
+        "topRetrievedDocId": "DOC-013",
+        "rankFound": null
+      }
+    ],
+    "hybrid_rrf": []
+  }
+}

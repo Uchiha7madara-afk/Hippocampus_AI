@@ -1,0 +1,119 @@
+name: Hippocampus Enterprise CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, staging]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-typecheck:
+    name: TypeScript & Zod Schema Verification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Run TypeScript Strict Typecheck (tsc --noEmit)
+        run: npm run lint
+
+      - name: Verify Production Vite Bundle Build
+        run: npm run build
+
+  drizzle-migration-dry-run:
+    name: Drizzle ORM & pgvector Migration Dry-Run
+    runs-on: ubuntu-latest
+    needs: lint-and-typecheck
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres_ci_password
+          POSTGRES_DB: hippocampus_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres_ci_password@localhost:5432/hippocampus_ci
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Enable pgvector Extension
+        run: |
+          PGPASSWORD=postgres_ci_password psql -h localhost -U postgres -d hippocampus_ci -c "CREATE EXTENSION IF NOT EXISTS vector;"
+
+      - name: Drizzle Schema Push Dry-Run Verification
+        run: npx drizzle-kit push --config=src/db/drizzle.config.ts --force
+
+  playwright-e2e:
+    name: Playwright E2E (Auth, RBAC & Hybrid RAG Flows)
+    runs-on: ubuntu-latest
+    needs: drizzle-migration-dry-run
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres_ci_password
+          POSTGRES_DB: hippocampus_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      NODE_ENV: test
+      PORT: 3000
+      DATABASE_URL: postgresql://postgres:postgres_ci_password@localhost:5432/hippocampus_ci
+      DEFAULT_RBAC_ROLE: Admin
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Push Drizzle Schema to Test Database
+        run: npx drizzle-kit push --config=src/db/drizzle.config.ts --force
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Playwright E2E Test Suite
+        run: npx playwright test
