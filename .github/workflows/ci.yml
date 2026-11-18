@@ -22,16 +22,18 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: 'npm'
 
       - name: Install Dependencies
-        run: npm ci
+        run: npm install --no-audit --no-fund
 
       - name: Run TypeScript Strict Typecheck (tsc --noEmit)
         run: npm run lint
 
       - name: Verify Production Vite Bundle Build
         run: npm run build
+
+      - name: Run Empirical RAG & RBAC Benchmark Suite
+        run: npm run benchmark
 
   drizzle-migration-dry-run:
     name: Drizzle ORM & pgvector Migration Dry-Run
@@ -53,6 +55,12 @@ jobs:
           --health-retries 5
     env:
       DATABASE_URL: postgresql://postgres:postgres_ci_password@localhost:5432/hippocampus_ci
+      SQL_HOST: localhost
+      SQL_DB_NAME: hippocampus_ci
+      SQL_ADMIN_USER: postgres
+      SQL_ADMIN_PASSWORD: postgres_ci_password
+      SQL_USER: postgres
+      SQL_PASSWORD: postgres_ci_password
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -61,10 +69,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: 'npm'
 
       - name: Install Dependencies
-        run: npm ci
+        run: npm install --no-audit --no-fund
 
       - name: Enable pgvector Extension
         run: |
@@ -95,6 +102,12 @@ jobs:
       NODE_ENV: test
       PORT: 3000
       DATABASE_URL: postgresql://postgres:postgres_ci_password@localhost:5432/hippocampus_ci
+      SQL_HOST: localhost
+      SQL_DB_NAME: hippocampus_ci
+      SQL_ADMIN_USER: postgres
+      SQL_ADMIN_PASSWORD: postgres_ci_password
+      SQL_USER: postgres
+      SQL_PASSWORD: postgres_ci_password
       DEFAULT_RBAC_ROLE: Admin
     steps:
       - name: Checkout Repository
@@ -104,10 +117,13 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: 'npm'
 
       - name: Install Dependencies
-        run: npm ci
+        run: npm install --no-audit --no-fund
+
+      - name: Enable pgvector Extension
+        run: |
+          PGPASSWORD=postgres_ci_password psql -h localhost -U postgres -d hippocampus_ci -c "CREATE EXTENSION IF NOT EXISTS vector;"
 
       - name: Push Drizzle Schema to Test Database
         run: npx drizzle-kit push --config=src/db/drizzle.config.ts --force

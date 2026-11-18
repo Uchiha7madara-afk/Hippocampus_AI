@@ -47,17 +47,35 @@ export function validateRuntimeEnv(): {
   env: ValidatedEnv;
   report: EnvValidationReport;
 } {
+  const isPlaceholder = (val?: string) =>
+    !val ||
+    val.startsWith('MY_') ||
+    val.startsWith('YOUR_') ||
+    val === 'placeholder';
+
   const raw = {
     NODE_ENV: process.env.NODE_ENV || 'development',
     PORT: process.env.PORT || '3000',
-    GEMINI_API_KEY: process.env.GEMINI_API_KEY || undefined,
-    DATABASE_URL: process.env.DATABASE_URL || undefined,
-    SQL_HOST: process.env.SQL_HOST || undefined,
-    SQL_USER: process.env.SQL_USER || undefined,
-    SQL_DB_NAME: process.env.SQL_DB_NAME || undefined,
-    SLACK_SIGNING_SECRET: process.env.SLACK_SIGNING_SECRET || undefined,
-    UPSTASH_REDIS_REST_URL: process.env.UPSTASH_REDIS_REST_URL || undefined,
-    UPSTASH_REDIS_REST_TOKEN: process.env.UPSTASH_REDIS_REST_TOKEN || undefined,
+    GEMINI_API_KEY: isPlaceholder(process.env.GEMINI_API_KEY)
+      ? undefined
+      : process.env.GEMINI_API_KEY,
+    DATABASE_URL: isPlaceholder(process.env.DATABASE_URL)
+      ? undefined
+      : process.env.DATABASE_URL,
+    SQL_HOST: process.env.SQL_HOST || 'localhost',
+    SQL_USER: process.env.SQL_USER || 'postgres',
+    SQL_DB_NAME: process.env.SQL_DB_NAME || 'postgres',
+    SLACK_SIGNING_SECRET: isPlaceholder(process.env.SLACK_SIGNING_SECRET)
+      ? undefined
+      : process.env.SLACK_SIGNING_SECRET,
+    UPSTASH_REDIS_REST_URL: isPlaceholder(process.env.UPSTASH_REDIS_REST_URL)
+      ? undefined
+      : process.env.UPSTASH_REDIS_REST_URL,
+    UPSTASH_REDIS_REST_TOKEN: isPlaceholder(
+      process.env.UPSTASH_REDIS_REST_TOKEN
+    )
+      ? undefined
+      : process.env.UPSTASH_REDIS_REST_TOKEN,
     DEFAULT_RBAC_ROLE: process.env.DEFAULT_RBAC_ROLE || 'Admin',
   };
 
