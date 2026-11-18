@@ -1,9 +1,9 @@
-import express, { Request, Response, NextFunction } from 'express';
+import express, { type Request, type Response, type NextFunction } from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import * as dotenv from 'dotenv';
 import { adminAuth } from './src/lib/firebase-admin.ts';
-import { requireAuth, AuthRequest } from './src/middleware/auth.ts';
+import { requireAuth, type AuthRequest } from './src/middleware/auth.ts';
 import {
   createOnboardingTrack,
   deleteDocumentById,
@@ -30,7 +30,7 @@ import {
 import {
   convertGoogleDocToMarkdown,
   fetchGithubRepositoryDocs,
-  GoogleDocStructuralResponse,
+  type GoogleDocStructuralResponse,
   listGoogleDriveDocuments,
   pullGoogleDriveDocumentAsMarkdown,
   verifyGithubWebhookSignature,
@@ -42,7 +42,7 @@ import {
 } from './src/lib/ai.ts';
 import {
   buildWelcomeMessage,
-  SlackEventPayload,
+  type SlackEventPayload,
   verifySlackRequest,
 } from './src/lib/slack.ts';
 import {
@@ -50,7 +50,7 @@ import {
   getObservabilityMetrics,
   recordSlackWebhookMetric,
   requestLoggerMiddleware,
-  TelemetryRequest,
+  type TelemetryRequest,
 } from './src/lib/logger.ts';
 import {
   createRateLimitMiddleware,
@@ -65,7 +65,7 @@ import {
   getEnvValidationReport,
   IngestDocumentRequestSchema,
   normalizeRbacRole,
-  RbacRole,
+  type RbacRole,
   ToggleOnboardingProgressSchema,
   UpdateRoleRequestSchema,
   validateRuntimeEnv,

@@ -2,14 +2,14 @@ import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 import { db } from './index.ts';
 import {
   agentSettings,
-  AgentToolInvocation,
+  type AgentToolInvocation,
   connectorSyncLogs,
   documentChunks,
   documents,
-  OnboardingPhase,
+  type OnboardingPhase,
   onboardingTracks,
   queryLogs,
-  RbacRole,
+  type RbacRole,
   semanticCache,
   userProgress,
   users,
@@ -18,7 +18,7 @@ import {
   computeDeterministicEmbedding,
   cosineSimilarity,
   generateEmbedding,
-  RetrievedChunk,
+  type RetrievedChunk,
 } from '../lib/ai.ts';
 import { emitStructuredLog, recordCacheEvent } from '../lib/logger.ts';
 import { getAllowedTiersForRole, normalizeRbacRole } from '../lib/env.ts';

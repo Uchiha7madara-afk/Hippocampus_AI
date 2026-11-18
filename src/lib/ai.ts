@@ -1,4 +1,4 @@
-import { FunctionDeclaration, GoogleGenAI, Type } from '@google/genai';
+import { type FunctionDeclaration, GoogleGenAI, Type } from '@google/genai';
 import {
   emitStructuredLog,
   recordAgentToolCall,

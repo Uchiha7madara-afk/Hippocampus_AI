@@ -1,5 +1,5 @@
 import type { Response, NextFunction } from 'express';
-import { emitStructuredLog, TelemetryRequest } from './logger.ts';
+import { emitStructuredLog, type TelemetryRequest } from './logger.ts';
 
 interface RateBucket {
   timestamps: number[];
