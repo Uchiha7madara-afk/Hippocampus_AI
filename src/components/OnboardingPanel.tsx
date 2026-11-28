@@ -23,6 +23,7 @@ interface OnboardingPanelProps {
   activeRole: RbacRole;
   loading: boolean;
   onToggleMilestone: (params: {
+    targetUid?: string;
     userHandle: string;
     trackId: number;
     completed: boolean;
@@ -113,12 +114,16 @@ export function OnboardingPanel({
       : 0;
 
   const handleToggle = async (trackId: number, currentCompleted: boolean) => {
-    if (!activeEngineer) return;
+    const targetUserHandle =
+      activeEngineer?.userHandle || onboarding?.activeUserHandle;
+    const targetUid = activeEngineer?.userUid || onboarding?.activeUserUid;
+    if (!targetUserHandle) return;
     setTogglingTrackId(trackId);
     setFeedback(null);
     try {
       await onToggleMilestone({
-        userHandle: activeEngineer.userHandle,
+        targetUid,
+        userHandle: targetUserHandle,
         trackId,
         completed: !currentCompleted,
       });

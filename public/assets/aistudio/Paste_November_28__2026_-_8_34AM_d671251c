@@ -1,0 +1,1050 @@
+# HIPPOCAMPUS AI — MISSION 001.7
+# INDEPENDENT SECURITY RE-AUDIT, ADVERSARIAL VERIFICATION & PRODUCTION ACCEPTANCE ASSESSMENT
+
+## 0. MISSION DIRECTIVE
+
+You are acting as an independent Principal Application Security Engineer, Cloud Security Architect, PostgreSQL Security Specialist, OAuth Security Reviewer, and Adversarial Penetration Tester.
+
+Your assignment is to conduct a rigorous, evidence-driven, READ-ONLY independent security audit of Hippocampus AI following completion of Mission 001.6.
+
+This is NOT an implementation mission.
+
+You must independently establish whether the security vulnerabilities identified in Mission 001.5 were genuinely eliminated, whether Mission 001.6 introduced new vulnerabilities, and whether the current application is suitable for a single-organization production deployment.
+
+You are not permitted to trust implementation reports, test summaries, developer explanations, comments, or claimed acceptance statuses without independently verifying the underlying evidence.
+
+Your final responsibility is to make an objective security acceptance decision.
+
+**Repository:** https://github.com/Uchiha7madara-afk/Hippocampus_AI
+
+**Primary evidence documents:**
+- MISSION_001_6_REMEDIATION_REPORT.md
+- MISSION_001_6_SECURITY_TEST_MATRIX.md
+- docs/SECURITY_PRODUCTION_CONFIG.md
+- Mission 001.5 Independent Security Acceptance Audit
+
+**Previous audit verdict:** REQUIRE REMEDIATION.
+
+**Mission 001.6 implementation claim:** AUD-001–AUD-004 and AUD-006–AUD-014 fixed; AUD-005 deferred; AUD-015 partially fixed.
+
+**Claimed automated verification:**
+- 52 security and PostgreSQL integration tests passed.
+- 4 Playwright E2E tests passed.
+- Drizzle migration check passed.
+- TypeScript strict typecheck passed.
+- Production compilation passed.
+- Zero production runtime dependency advisories.
+- One moderate dev-only transitive advisory remains.
+
+All these claims must be treated as UNVERIFIED until independently reproduced.
+
+---
+
+# 1. NON-NEGOTIABLE AUDIT RULES
+
+## 1.1 Read-only operation
+
+You MUST NOT:
+- Modify application source code.
+- Modify database schema or migration files.
+- Modify package manifests or lockfiles.
+- Modify CI/CD configuration.
+- Modify environment files.
+- Change production or staging configuration.
+- Apply migrations to production.
+- Deploy application changes.
+- Create or modify production data.
+- Weaken authentication or authorization to make tests pass.
+- Replace failing tests with mocked success responses.
+
+You may create temporary audit scripts, isolated test fixtures, and disposable local test databases if they do not modify repository deliverables or external environments.
+
+If a test requires changing source code, classify it as NOT EXECUTED and explain why.
+
+## 1.2 Independent verification
+
+For every claimed fix:
+
+1. Locate the relevant implementation.
+2. Trace the complete execution path.
+3. Identify trust boundaries.
+4. Identify authorization checks.
+5. Inspect database queries and constraints.
+6. Inspect failure and exception handling.
+7. Execute relevant existing tests.
+8. Construct independent adversarial tests.
+9. Record exact evidence.
+10. Assign a verdict.
+
+A passing test is not sufficient if the test does not actually exercise the relevant security boundary.
+
+## 1.3 No unsupported conclusions
+
+Never report:
+- "Secure" because tests pass.
+- "Production ready" because the application compiles.
+- "Tenant isolated" when org-level isolation does not exist.
+- "Encrypted" without verifying encryption and key management.
+- "Immutable" without verifying database enforcement and privileges.
+- "Fail-closed" without exercising actual failure paths.
+
+Distinguish:
+- Source-code inspection.
+- Automated test execution.
+- Independent adversarial testing.
+- Local database testing.
+- Real staging verification.
+- Production infrastructure verification.
+
+Do not claim to have inspected a live environment unless you actually accessed it with authorized credentials.
+
+## 1.4 Evidence preservation
+
+Record:
+- Git commit hash.
+- Current branch.
+- Working tree status.
+- Node/Bun/npm versions.
+- PostgreSQL/PGlite versions.
+- Test commands.
+- Test outputs.
+- Relevant file paths and line numbers.
+- Migration checksums.
+- Dependency audit output.
+- Reproduction steps for every finding.
+
+Do not expose secrets, tokens, private keys, or personally identifiable information in the audit report.
+
+---
+
+# 2. PHASE ZERO — REPOSITORY AND EVIDENCE INTEGRITY
+
+Before testing vulnerabilities, establish exactly what is being audited.
+
+Inspect:
+
+- Git commit and branch.
+- Git status and uncommitted changes.
+- Mission 001.6 implementation files.
+- Migration 0000 and 0001.
+- Drizzle metadata and schema.
+- Test files and fixtures.
+- CI workflow.
+- Package manifests and lockfiles.
+- Production configuration documentation.
+
+Verify that the reports correspond to the actual repository state.
+
+Determine whether the tests cited in the reports are present and whether the implementation being tested is the same implementation currently checked out.
+
+### Required checks
+
+Execute where available:
+
+- `git rev-parse HEAD`
+- `git status --short`
+- `git diff --stat`
+- `git log -10 --oneline`
+- `npm run test:security`
+- `npx playwright test --reporter=list`
+- `npx drizzle-kit check --config=src/db/drizzle.config.ts`
+- `npx tsc --noEmit`
+- Production build command documented in package.json.
+- `bun audit` or the package manager's supported security audit command.
+
+Do not assume these commands exist. Inspect package.json and report any mismatch.
+
+### Deliverable
+
+Create a repository integrity table with:
+- Expected artifact.
+- Actual artifact.
+- Verified status.
+- Evidence.
+- Discrepancy.
+
+---
+
+# 3. PHASE ONE — RE-AUDIT ALL ORIGINAL SECURITY FINDINGS
+
+You must independently retest AUD-001 through AUD-015.
+
+## AUD-001 — Cross-role semantic cache authorization
+
+Original vulnerability:
+Admin semantic-cache answers could be retrieved by lower-privileged users through similarity matching.
+
+Inspect:
+- L1 memory cache.
+- L2 PostgreSQL cache.
+- Cache lookup and write functions.
+- Role normalization.
+- Search-mode partitioning.
+- Cache versioning.
+- Similarity threshold logic.
+- Cache invalidation.
+- Fallback paths.
+
+Adversarial scenarios:
+
+1. Admin writes a secret answer.
+2. Engineer submits an identical query.
+3. Manager submits an identical query.
+4. Engineer submits a semantically similar query.
+5. Manager submits a semantically similar query.
+6. Search mode changes while query remains identical.
+7. Role changes after cache creation.
+8. Legacy cache v1 entries exist.
+9. L1 is cleared to force L2 lookup.
+10. Concurrent requests attempt cross-role cache access.
+
+Verify that neither lower-privileged role can obtain protected answers, citations, or metadata.
+
+Do not rely exclusively on exact string matching. Test semantic similarity and cache-key collision scenarios.
+
+**Acceptance:** No cross-role information disclosure in any cache layer or fallback path.
+
+## AUD-002 — Semantic-cache telemetry authorization
+
+Inspect every telemetry endpoint and helper.
+
+Verify:
+- Role filtering happens at the database query level.
+- Higher-role entries are not returned to lower roles.
+- Answers and embeddings are never exposed.
+- Query content is not exposed.
+- Aggregate statistics cannot reveal protected information.
+- Alternate routes do not bypass the role filter.
+
+Test direct API calls using every authorized role.
+
+**Acceptance:** Only authorized metadata is visible. No protected answers, embeddings, or higher-role entries are exposed.
+
+## AUD-003 — Production persistence fail-open behavior
+
+Inspect every database operation.
+
+Search for:
+- fallbackStore
+- in-memory persistence
+- catch blocks returning default data
+- silent exception suppression
+- optional database branches
+- mock database injection
+- environment-dependent behavior
+
+Test database failures across:
+- Authentication synchronization.
+- Document creation and deletion.
+- Settings.
+- Onboarding.
+- Audit logs.
+- Semantic cache.
+- GitHub OAuth.
+- Slack webhook.
+- GitHub webhook.
+- User and role operations.
+
+Test:
+1. PostgreSQL unavailable.
+2. Connection refused.
+3. Query timeout.
+4. Transaction failure.
+5. Constraint violation.
+6. Partial write.
+7. Database recovery after outage.
+
+Verify that production never reports successful persistence when the database operation failed.
+
+**Acceptance:** Production persistence failures are explicit and fail closed. No silent in-memory fallback or false-success response.
+
+## AUD-004 — GitHub OAuth ownership, session binding and token isolation
+
+Inspect the complete OAuth lifecycle.
+
+Verify:
+- State generation.
+- State entropy.
+- State hashing.
+- Atomic single-use state consumption.
+- Browser-binding cookie.
+- Cookie signing.
+- Cookie expiration.
+- Cookie flags.
+- PKCE generation and verification.
+- OAuth callback ownership.
+- Token exchange.
+- Token encryption.
+- Token retrieval.
+- Per-user connection state.
+- Disconnect behavior.
+- Database persistence.
+- Error handling.
+
+Adversarial tests:
+
+1. Callback without state.
+2. Callback with expired state.
+3. Callback with replayed state.
+4. Callback with another user's state.
+5. Callback without binding cookie.
+6. Callback with forged binding cookie.
+7. Callback from another browser session.
+8. Failed token exchange.
+9. Token exchange timeout.
+10. Cross-user connection lookup.
+11. Cross-user disconnect attempt.
+12. Concurrent state consumption.
+13. Database outage during callback.
+14. Encryption/decryption failure.
+15. Encryption key rotation or incorrect key.
+
+Inspect whether tokens are actually encrypted at rest and whether logs, responses, telemetry, or frontend state expose them.
+
+Check whether the OAuth implementation is safe under multiple application instances.
+
+**Acceptance:** OAuth state is single-use and browser-bound; credentials are encrypted and strictly user-owned; failed exchanges never create false connected states.
+
+## AUD-005 — Multi-tenancy
+
+This finding is explicitly deferred to Mission 002.
+
+Do not implement multi-tenancy in this mission.
+
+Verify that documentation clearly states:
+- The system currently has a single-organization trust boundary.
+- External customer organizations must not share the same instance.
+- Multi-tenant SaaS remains prohibited until Mission 002 is independently accepted.
+
+**Acceptance:** Correctly documented as DEFERRED, not FIXED.
+
+## AUD-006 — Migration integrity and production database configuration
+
+Inspect:
+- Migration 0000.
+- Migration 0001.
+- SQL statements.
+- Transaction safety.
+- Existing data preservation.
+- Unique constraints.
+- Partial indexes.
+- Foreign keys.
+- Defaults.
+- Trigger installation.
+- Drizzle snapshots.
+- Migration journal.
+- Database TLS configuration.
+- Unix socket behavior.
+- Cloud SQL connection assumptions.
+
+Test on disposable databases:
+1. Empty database.
+2. Populated legacy database.
+3. Duplicate legacy onboarding records.
+4. Existing semantic cache v1 entries.
+5. Repeated migration execution.
+6. Interrupted migration simulation where practical.
+7. Migration against an already partially migrated database.
+
+Inspect whether migrations are genuinely safe for the actual target PostgreSQL version.
+
+**Acceptance:** No destructive data loss, unsafe assumptions, or migration drift. Real staging migration remains a separate operational gate.
+
+## AUD-007 — Bootstrap Admin authorization
+
+Inspect:
+- email_verified handling.
+- Firebase token claims.
+- Admin bootstrap configuration.
+- Initial user creation.
+- Existing user synchronization.
+- Role persistence.
+- Role changes and demotion.
+- Race conditions.
+
+Test:
+- Unverified bootstrap email.
+- Verified bootstrap email.
+- Existing Engineer with bootstrap email.
+- Demoted former Admin.
+- Repeated synchronization.
+- Concurrent first-time account creation.
+- Missing or malformed bootstrap configuration.
+
+**Acceptance:** Only explicitly verified first-time bootstrap accounts can receive the initial Admin role. Existing persisted roles cannot be silently elevated again.
+
+## AUD-008 — GitHub webhook integrity and replay protection
+
+Inspect:
+- Raw request body handling.
+- HMAC-SHA256 verification.
+- Timing-safe comparison.
+- Secret handling.
+- Mandatory X-GitHub-Delivery.
+- Payload validation.
+- Event deduplication.
+- Rate limiting.
+- Persistence.
+- Failure behavior.
+
+Test:
+- Invalid signatures.
+- Modified body.
+- Missing delivery ID.
+- Malformed delivery ID.
+- Duplicate delivery.
+- Concurrent duplicate deliveries.
+- Missing secret.
+- Invalid secret.
+- Database outage.
+- Rate-limit exhaustion.
+- Spoofed forwarded IP headers.
+
+**Acceptance:** Invalid, malformed, replayed, or unpersistable webhook events cannot be treated as successful new deliveries.
+
+## AUD-009 — Slack webhook integrity
+
+Inspect:
+- Raw Buffer preservation.
+- Signature calculation.
+- Timestamp validation.
+- Replay window.
+- Event schema.
+- Event ID.
+- Deduplication.
+- Persistence.
+- Development simulator.
+- Production route availability.
+
+Test:
+- Non-numeric timestamps.
+- Incorrect timestamp length.
+- Expired timestamps.
+- Future timestamps.
+- Invalid signatures.
+- Modified raw body.
+- Malformed payload.
+- Duplicate event IDs.
+- Concurrent duplicates.
+- Missing signing secret.
+- Database outage.
+- Development simulator mutation attempts.
+- Production simulator access.
+
+**Acceptance:** Slack events are authenticated against the original raw bytes, validated, replay-protected, and deduplicated atomically.
+
+## AUD-010 — OAuth callback XSS and browser messaging
+
+Inspect:
+- HTML serialization.
+- Script serialization.
+- JSON escaping.
+- HTML escaping.
+- CSP.
+- postMessage target origin.
+- event.origin validation.
+- opener interaction.
+- callback response behavior.
+
+Test payloads containing:
+- `</script>`
+- `<img src=x onerror=alert(1)>`
+- Quotes and backslashes.
+- Unicode separators.
+- HTML entities.
+- Malicious URLs.
+- Unexpected origins.
+
+Verify that no attacker-controlled data can execute JavaScript or communicate with an unintended origin.
+
+**Acceptance:** No exploitable reflected/stored XSS or cross-origin messaging vulnerability.
+
+## AUD-011 — Logging, telemetry and request-ID injection
+
+Inspect all logging and telemetry paths.
+
+Search for:
+- authorization headers.
+- cookies.
+- OAuth codes.
+- OAuth state.
+- access tokens.
+- webhook secrets.
+- database URLs.
+- embeddings.
+- prompts.
+- query content.
+- agent arguments.
+- exception messages.
+- raw upstream responses.
+
+Test nested objects, arrays, unusual casing, encoded strings, CRLF, and malformed request IDs.
+
+Check whether redaction is applied before data reaches persistent logs and external observability services.
+
+**Acceptance:** No secrets, sensitive query content, or attacker-controlled log injection can reach telemetry or audit logs.
+
+## AUD-012 — CORS and proxy trust
+
+Inspect:
+- CORS origin allowlist.
+- Host validation.
+- X-Forwarded-Host.
+- X-Forwarded-Proto.
+- X-Forwarded-For.
+- Express trust proxy configuration.
+- Cookie security decisions.
+- Redirect generation.
+- Rate-limit identity.
+- Deployment proxy assumptions.
+
+Test:
+- Untrusted Origin.
+- Spoofed Host.
+- Spoofed X-Forwarded-Proto.
+- Spoofed X-Forwarded-For.
+- Multiple forwarded headers.
+- Malformed origin.
+- Null origin.
+- Missing origin.
+- Allowed origin.
+- Origin with unexpected port or scheme.
+
+**Acceptance:** No origin reflection, spoofed proxy trust, or security decision based on untrusted forwarding headers.
+
+## AUD-013 — Onboarding identity isolation
+
+Inspect:
+- Immutable user UID.
+- Legacy handle migration.
+- Partial unique indexes.
+- Query filtering.
+- Read/write ownership.
+- Default onboarding data.
+- Cross-user mutation protection.
+
+Test:
+- Same email local-part with different domains.
+- Different Firebase UIDs.
+- New Engineer with no onboarding records.
+- Attempts to access another UID.
+- Attempts to mutate another UID.
+- Legacy rows.
+- Duplicate migration data.
+- Concurrent writes.
+
+**Acceptance:** Onboarding records are isolated by immutable identity, and no cross-user data leakage occurs.
+
+## AUD-014 — Audit-log append-only enforcement
+
+Inspect:
+- Database trigger.
+- Trigger function.
+- Table privileges.
+- Application DB role privileges.
+- Migration ownership.
+- Audit log write path.
+- Audit metadata redaction.
+- Transaction behavior.
+
+Test:
+- Direct UPDATE.
+- Direct DELETE.
+- TRUNCATE.
+- Attempts to disable/drop trigger using the application's DB role.
+- Audit write during DB outage.
+- Invalid metadata.
+- Unauthorized audit access.
+
+Determine whether the application DB role can bypass the intended append-only property.
+
+Important: A trigger alone does not necessarily guarantee immutability against a privileged database owner or superuser. Document the actual trust boundary accurately.
+
+**Acceptance:** The application cannot alter or delete existing audit records through its normal database privileges. Any higher-privilege bypass must be explicitly documented.
+
+## AUD-015 — Dependency security
+
+Independently inspect:
+- Runtime dependencies.
+- Development dependencies.
+- Transitive dependencies.
+- Lockfile integrity.
+- Production bundle.
+- Known advisories.
+- Dependency overrides.
+- CI audit behavior.
+
+Verify the claim that the remaining drizzle-kit/esbuild advisory is development-only.
+
+Check whether the affected development server can accidentally become reachable in deployed environments.
+
+**Acceptance:** No unresolved critical/high production runtime advisories. Remaining dev-only advisories must have a defensible risk classification and mitigation.
+
+---
+
+# 4. PHASE TWO — NEW ATTACK SURFACE REVIEW
+
+Mission 001.6 changed substantial application functionality. You must search for vulnerabilities beyond the original audit findings.
+
+## 4.1 Authentication and authorization
+
+Inspect:
+- All protected endpoints.
+- Role middleware.
+- Firebase token verification.
+- Revocation checks.
+- User synchronization.
+- Admin operations.
+- Identity headers.
+- Role defaults.
+- Authorization checks before data retrieval.
+
+Construct a route authorization matrix.
+
+Test every route with:
+- Unauthenticated caller.
+- Engineer.
+- Manager.
+- Admin.
+- Forged role header.
+- Forged identity header.
+- Expired/revoked token where safely testable.
+
+## 4.2 IDOR and resource ownership
+
+Test whether a user can access or mutate another user's:
+- Documents.
+- Connector connections.
+- OAuth state.
+- Onboarding data.
+- Audit logs.
+- Settings.
+- Query history.
+- Semantic cache entries.
+- Exported data.
+
+## 4.3 SQL injection and query safety
+
+Inspect all dynamic SQL and ORM queries.
+
+Review:
+- Parameterization.
+- Raw SQL.
+- Search filters.
+- Pagination.
+- Sorting.
+- User-supplied identifiers.
+- JSON fields.
+- Database error handling.
+
+Do not limit testing to obvious string-based SQL injection.
+
+## 4.4 Document ingestion and RAG security
+
+Hippocampus is a RAG application. Review the complete ingestion and retrieval pipeline.
+
+Test:
+- Malicious PDF/document uploads.
+- Oversized files.
+- MIME-type spoofing.
+- Parser crashes.
+- Malformed documents.
+- Prompt injection embedded in uploaded documents.
+- Cross-role document retrieval.
+- Unauthorized citations.
+- Cross-user retrieval.
+- Vector metadata leakage.
+- Chunk ownership.
+- Deletion consistency.
+- Partial ingestion failure.
+- Re-ingestion and duplicate handling.
+
+Determine whether retrieved document content is treated as untrusted data rather than executable instructions.
+
+Check whether document permissions are enforced before retrieval results are exposed to the model or user.
+
+## 4.5 Agent and tool execution security
+
+Inspect all agent execution paths.
+
+Review:
+- Tool authorization.
+- Argument validation.
+- Filesystem access.
+- External URL access.
+- SSRF exposure.
+- Shell execution.
+- Tool output handling.
+- Prompt injection resistance.
+- Resource limits.
+- Timeouts.
+- User attribution.
+- Logging.
+
+If agents can call tools, verify that their permissions are bounded by the requesting user's permissions.
+
+## 4.6 API and operational security
+
+Review:
+- Request size limits.
+- Upload limits.
+- Rate limits.
+- Timeouts.
+- Resource exhaustion.
+- Error disclosure.
+- Security headers.
+- Session handling.
+- CSRF protection where applicable.
+- Cookie settings.
+- Cache-control behavior.
+- Health endpoint information disclosure.
+- Debug endpoints.
+- Development-only routes.
+- Production environment detection.
+
+## 4.7 Frontend security
+
+Inspect:
+- Token storage.
+- Browser storage.
+- Sensitive state.
+- Connector status.
+- OAuth callback handling.
+- XSS sinks.
+- dangerouslySetInnerHTML.
+- External links.
+- postMessage.
+- Source maps.
+- Exposed environment variables.
+- API response handling.
+
+---
+
+# 5. PHASE THREE — DATABASE AND INFRASTRUCTURE SECURITY
+
+## 5.1 PostgreSQL review
+
+Verify:
+- Application DB role has least privilege.
+- Schema ownership is separated where practical.
+- No unnecessary superuser privileges.
+- TLS verification is enforced.
+- Connection credentials are not hardcoded.
+- Sensitive columns are protected.
+- Constraints enforce critical invariants.
+- Migration execution is controlled.
+- Backup and restoration procedures exist.
+
+## 5.2 Secret management
+
+Inspect required production variables:
+
+- DATABASE_URL or Cloud SQL configuration.
+- CONNECTOR_TOKEN_ENCRYPTION_KEY.
+- OAUTH_STATE_COOKIE_SECRET.
+- ALLOWED_ORIGINS.
+- APP_URL.
+- TRUST_PROXY_HOPS.
+- GITHUB_WEBHOOK_SECRET.
+- SLACK_SIGNING_SECRET.
+- Firebase service-account credentials or supported workload identity.
+
+Verify:
+- No committed secrets.
+- No insecure default values.
+- No accidental exposure to frontend bundles.
+- Strong key validation.
+- Clear rotation procedures.
+- Failure on missing mandatory production secrets.
+
+Do not print actual secret values.
+
+## 5.3 Deployment security
+
+Inspect actual deployment configuration where accessible.
+
+Review:
+- Vercel configuration.
+- Backend hosting configuration.
+- Cloud SQL assumptions.
+- Environment separation.
+- Build/deployment workflows.
+- Secret injection.
+- Network exposure.
+- HTTPS.
+- Logging.
+- Monitoring.
+- Rollback procedures.
+
+If access to staging or production is unavailable, classify the checks as BLOCKED BY INFRASTRUCTURE. Do not infer successful deployment security from local tests.
+
+---
+
+# 6. PHASE FOUR — INDEPENDENT ADVERSARIAL TESTING
+
+Create a separate audit test suite or temporary test harness without changing production source files.
+
+At minimum, execute:
+
+1. Cross-role cache isolation.
+2. Cross-role telemetry isolation.
+3. Production database failure behavior.
+4. OAuth state replay.
+5. OAuth browser binding.
+6. OAuth cross-user token isolation.
+7. Webhook HMAC tampering.
+8. Webhook concurrent replay.
+9. Slack timestamp replay.
+10. CORS spoofing.
+11. Onboarding cross-UID access.
+12. Audit-log UPDATE/DELETE/TRUNCATE behavior.
+13. Forged role and identity headers.
+14. Document IDOR.
+15. RAG permission enforcement.
+16. Prompt injection in uploaded documents.
+17. Agent tool permission escalation.
+18. SSRF and unsafe external URL handling.
+19. Secret leakage in logs.
+20. Production-only route exposure.
+
+For each test, preserve:
+- Attack scenario.
+- Preconditions.
+- Exact test command or request.
+- Expected result.
+- Observed result.
+- Evidence.
+- Security impact.
+- Pass/fail classification.
+
+Do not test against live production systems without explicit authorization.
+
+---
+
+# 7. PHASE FIVE — TEST QUALITY AND COVERAGE AUDIT
+
+Do not merely count tests.
+
+Inspect whether:
+- Security tests use meaningful assertions.
+- Tests execute actual authorization middleware.
+- Database integration tests use real PostgreSQL semantics.
+- Failure tests exercise genuine failure paths.
+- Tests cannot pass because of permissive mocks.
+- Tests assert absence of sensitive data.
+- Tests cover concurrency.
+- Tests cover both L1 and L2 cache paths.
+- Tests cover role changes.
+- Tests cover malformed inputs.
+- Tests cover negative cases.
+- E2E tests use production-like authentication and configuration.
+
+Identify:
+- Missing tests.
+- False-positive tests.
+- Dead tests.
+- Duplicated tests.
+- Mock-only coverage.
+- Unreachable test assertions.
+- Uncovered critical branches.
+
+Provide a finding-to-test traceability matrix.
+
+---
+
+# 8. PHASE SIX — SEVERITY AND ACCEPTANCE CLASSIFICATION
+
+Use the following severity scale:
+
+CRITICAL:
+Remote or easily exploitable compromise involving privilege escalation, broad sensitive-data disclosure, credential theft, or complete security boundary failure.
+
+HIGH:
+Meaningful unauthorized access, persistent security compromise, sensitive cross-user disclosure, or major integrity failure.
+
+MEDIUM:
+Limited but meaningful security weakness requiring mitigation.
+
+LOW:
+Restricted impact, defense-in-depth issue, or operational concern.
+
+INFORMATIONAL:
+Documentation or architectural observation without an immediate exploitable vulnerability.
+
+Use these verdicts for every finding:
+
+- VERIFIED FIXED
+- PARTIALLY FIXED
+- NOT FIXED
+- NOT TESTED
+- BLOCKED BY INFRASTRUCTURE
+- NEW FINDING
+
+A finding cannot be marked VERIFIED FIXED based solely on developer claims or an existing test name.
+
+## Overall verdicts
+
+A. ACCEPTED — SINGLE-ORGANIZATION PRODUCTION BASELINE
+
+Only if:
+- No unresolved Critical or High findings.
+- All original in-scope findings independently verified.
+- No newly discovered Critical or High findings.
+- Production configuration is adequately verified.
+- Migration and rollback procedures are accepted.
+- No material test-integrity issues remain.
+
+B. CONDITIONAL ACCEPTANCE — STAGING ONLY
+
+If:
+- No unresolved Critical or High code vulnerabilities are found.
+- Some infrastructure or operational checks remain unverified.
+- Production readiness depends on successful staging deployment and operational validation.
+
+C. REQUIRE REMEDIATION
+
+If:
+- Any Critical or High finding remains.
+- A previously fixed vulnerability is reproducible.
+- New material security vulnerabilities are identified.
+- Security controls fail under realistic adversarial conditions.
+
+D. INSUFFICIENT EVIDENCE
+
+If:
+- Repository state is incomplete.
+- Critical artifacts are missing.
+- Tests cannot be executed.
+- The implementation cannot be independently inspected.
+
+Multi-tenant SaaS acceptance is explicitly OUT OF SCOPE and remains NO-GO pending Mission 002.
+
+---
+
+# 9. FINAL DELIVERABLES
+
+Create the following documents:
+
+## A. MISSION_001_7_INDEPENDENT_SECURITY_AUDIT_REPORT.md
+
+Required sections:
+
+1. Executive Summary.
+2. Audit Scope.
+3. Repository Integrity.
+4. Methodology.
+5. Environment and Tool Versions.
+6. Test Execution Results.
+7. AUD-001–AUD-015 Verification Matrix.
+8. New Vulnerabilities.
+9. Authentication and RBAC Review.
+10. OAuth Review.
+11. Webhook Review.
+12. PostgreSQL and Migration Review.
+13. RAG and Document Security Review.
+14. Agent and Tool Security Review.
+15. Frontend Security Review.
+16. Infrastructure and Deployment Review.
+17. Test Quality Assessment.
+18. Risk Register.
+19. Production Readiness Assessment.
+20. Final Verdict.
+21. Remediation Recommendations.
+22. Evidence Appendix.
+
+## B. MISSION_001_7_ADVERSARIAL_TEST_MATRIX.md
+
+Include:
+- Test ID.
+- Finding ID.
+- Security domain.
+- Attack scenario.
+- Preconditions.
+- Test execution method.
+- Expected behavior.
+- Actual behavior.
+- Evidence.
+- Result.
+- Severity.
+
+## C. MISSION_001_7_PRODUCTION_ACCEPTANCE_CHECKLIST.md
+
+Include:
+- Code acceptance.
+- Authentication acceptance.
+- Authorization acceptance.
+- OAuth acceptance.
+- Webhook acceptance.
+- Database acceptance.
+- Migration acceptance.
+- Secret management.
+- Logging and monitoring.
+- Backup and recovery.
+- Staging verification.
+- Rollback readiness.
+- Explicit production approval requirements.
+
+## D. MISSION_001_7_REMEDIATION_BACKLOG.md
+
+If vulnerabilities are found, create a prioritized remediation backlog.
+
+Each item must include:
+- Finding ID.
+- Severity.
+- Affected components.
+- Root cause.
+- Reproduction steps.
+- Required remediation.
+- Security acceptance criteria.
+- Regression tests.
+- Dependencies.
+- Deployment implications.
+
+Do not implement the remediation backlog.
+
+---
+
+# 10. PRODUCTION RELEASE DECISION
+
+The final report must answer these questions explicitly:
+
+1. Is the current codebase safe for a single-organization staging deployment?
+2. Are all AUD-001–AUD-004 and AUD-006–AUD-014 findings independently verified as fixed?
+3. Is AUD-015 acceptable under the documented dependency risk?
+4. Were any new Critical or High vulnerabilities discovered?
+5. Is the migration safe for the actual production database?
+6. Has the staging infrastructure been independently verified?
+7. Is the application safe for a single-organization production deployment?
+8. Is it safe for multi-tenant SaaS? (Expected answer remains NO until Mission 002.)
+9. What exact actions remain before production authorization?
+10. What is the final independent audit verdict?
+
+Never combine code acceptance with infrastructure acceptance.
+
+A locally verified application may be suitable for staging without being approved for production.
+
+---
+
+# 11. FINAL INSTRUCTIONS
+
+Operate as an independent auditor, not as the original implementation agent.
+
+Be skeptical, precise, reproducible, and evidence-driven.
+
+Do not modify code to make the audit pass.
+
+Do not conceal failures.
+
+Do not lower severity to protect the implementation team's result.
+
+Do not claim production verification without actual authorized infrastructure access.
+
+Do not begin Mission 002.
+
+Do not implement any remediation.
+
+If access, dependencies, credentials, or infrastructure are unavailable, document the limitation and continue with the remaining audit work.
+
+The purpose of Mission 001.7 is to establish whether Hippocampus AI has actually achieved a trustworthy single-organization security baseline.
+
+**Your final output must be an evidence-backed independent security verdict, not a congratulatory implementation summary.**

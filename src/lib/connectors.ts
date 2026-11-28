@@ -17,31 +17,72 @@ export interface GoogleDriveFileItem {
   webViewLink?: string;
 }
 
+export interface WebhookVerificationResult {
+  valid: boolean;
+  reason?:
+    | 'missing_secret'
+    | 'missing_raw_body'
+    | 'missing_signature'
+    | 'malformed_signature'
+    | 'signature_mismatch';
+}
+
+const GITHUB_SHA256_SIGNATURE_REGEX = /^sha256=([0-9a-f]{64})$/i;
+
 /**
- * Step 3: Verify GitHub Webhook HMAC-SHA256 Signature (x-hub-signature-256)
+ * Mission 001: Strict, fail-closed GitHub Webhook HMAC-SHA256 verification over exact raw bytes.
  */
+export function verifyGithubWebhookSignatureDetailed(
+  signatureHeader: string | undefined,
+  rawBody: Buffer | string | undefined,
+  secretOverride?: string
+): WebhookVerificationResult {
+  const secret = (secretOverride ?? process.env.GITHUB_WEBHOOK_SECRET)?.trim();
+  if (!secret) {
+    return { valid: false, reason: 'missing_secret' };
+  }
+  if (rawBody === undefined || rawBody === null) {
+    return { valid: false, reason: 'missing_raw_body' };
+  }
+  if (!signatureHeader || typeof signatureHeader !== 'string') {
+    return { valid: false, reason: 'missing_signature' };
+  }
+
+  const match = GITHUB_SHA256_SIGNATURE_REGEX.exec(signatureHeader.trim());
+  if (!match) {
+    return { valid: false, reason: 'malformed_signature' };
+  }
+
+  const rawBuffer = Buffer.isBuffer(rawBody)
+    ? rawBody
+    : Buffer.from(rawBody, 'utf8');
+  const expectedDigest = crypto
+    .createHmac('sha256', secret)
+    .update(rawBuffer)
+    .digest();
+  const providedDigest = Buffer.from(match[1].toLowerCase(), 'hex');
+
+  if (providedDigest.length !== expectedDigest.length) {
+    return { valid: false, reason: 'malformed_signature' };
+  }
+
+  if (!crypto.timingSafeEqual(providedDigest, expectedDigest)) {
+    return { valid: false, reason: 'signature_mismatch' };
+  }
+
+  return { valid: true };
+}
+
 export function verifyGithubWebhookSignature(
   signatureHeader: string | undefined,
-  rawBody: string
+  rawBody: Buffer | string | undefined,
+  secretOverride?: string
 ): boolean {
-  const secret = process.env.GITHUB_WEBHOOK_SECRET;
-  if (!secret) {
-    // When no secret is set in dev, allow simulator events
-    return true;
-  }
-  if (!signatureHeader || !signatureHeader.startsWith('sha256=')) {
-    return false;
-  }
-  const expected =
-    'sha256=' +
-    crypto.createHmac('sha256', secret).update(rawBody, 'utf8').digest('hex');
-
-  const sigBuf = Buffer.from(signatureHeader, 'utf8');
-  const expBuf = Buffer.from(expected, 'utf8');
-  if (sigBuf.length !== expBuf.length) {
-    return false;
-  }
-  return crypto.timingSafeEqual(sigBuf, expBuf);
+  return verifyGithubWebhookSignatureDetailed(
+    signatureHeader,
+    rawBody,
+    secretOverride
+  ).valid;
 }
 
 /**

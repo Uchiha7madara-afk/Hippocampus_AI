@@ -1,4 +1,13 @@
+import fs from 'node:fs';
 import { defineConfig, devices } from '@playwright/test';
+
+const containerHeadlessShell =
+  '/ms-playwright/chrome-headless-shell-linux64/chrome-headless-shell';
+const chromiumExecutablePath =
+  process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ||
+  (!process.env.CI && fs.existsSync(containerHeadlessShell)
+    ? containerHeadlessShell
+    : undefined);
 
 export default defineConfig({
   testDir: './e2e',
@@ -14,7 +23,12 @@ export default defineConfig({
   projects: [
     {
       name: 'chromium',
-      use: { ...devices['Desktop Chrome'] },
+      use: {
+        ...devices['Desktop Chrome'],
+        ...(chromiumExecutablePath
+          ? { launchOptions: { executablePath: chromiumExecutablePath } }
+          : {}),
+      },
     },
   ],
   webServer: {

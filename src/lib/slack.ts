@@ -24,31 +24,51 @@ export interface SlackEventPayload {
   event_time?: number;
 }
 
+const SLACK_TIMESTAMP_PATTERN = /^\d{10}$/;
+const SLACK_SIGNATURE_PATTERN = /^v0=[a-f0-9]{64}$/i;
+
 export function verifySlackRequest(
   signature: string | null | undefined,
   timestamp: string | null | undefined,
-  rawBody: string,
+  rawBody: Buffer | string | undefined,
   signingSecret?: string
 ): boolean {
-  const secret = signingSecret || process.env.SLACK_SIGNING_SECRET;
+  const secret = (signingSecret || process.env.SLACK_SIGNING_SECRET)?.trim();
   if (!secret) {
-    // Allow internal simulator requests when signing secret is not set in environment
     return false;
   }
-  if (!signature || !timestamp) return false;
+  if (!signature || !timestamp || rawBody === undefined) return false;
+
+  const trimmedTimestamp = timestamp.trim();
+  const trimmedSignature = signature.trim();
+
+  if (
+    !SLACK_TIMESTAMP_PATTERN.test(trimmedTimestamp) ||
+    !SLACK_SIGNATURE_PATTERN.test(trimmedSignature)
+  ) {
+    return false;
+  }
 
   const now = Math.floor(Date.now() / 1000);
-  const requestTime = parseInt(timestamp, 10);
-  if (isNaN(requestTime) || Math.abs(now - requestTime) > FIVE_MINUTES_SEC) {
+  const requestTime = Number(trimmedTimestamp);
+  if (
+    !Number.isSafeInteger(requestTime) ||
+    Math.abs(now - requestTime) > FIVE_MINUTES_SEC
+  ) {
     return false;
   }
 
-  const baseString = `v0:${timestamp}:${rawBody}`;
-  const computed = createHmac('sha256', secret).update(baseString).digest('hex');
+  const rawBuffer = Buffer.isBuffer(rawBody)
+    ? rawBody
+    : Buffer.from(rawBody, 'utf8');
+  const prefixBuffer = Buffer.from(`v0:${trimmedTimestamp}:`, 'utf8');
+  const computed = createHmac('sha256', secret)
+    .update(Buffer.concat([prefixBuffer, rawBuffer]))
+    .digest('hex');
   const expected = `v0=${computed}`;
 
-  const sigBuf = Buffer.from(signature);
-  const expectedBuf = Buffer.from(expected);
+  const sigBuf = Buffer.from(trimmedSignature.toLowerCase(), 'utf8');
+  const expectedBuf = Buffer.from(expected, 'utf8');
 
   if (sigBuf.length !== expectedBuf.length) return false;
   return timingSafeEqual(sigBuf, expectedBuf);

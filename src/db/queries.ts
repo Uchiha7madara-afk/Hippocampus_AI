@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNull, lt } from 'drizzle-orm';
 import { db } from './index.ts';
 import {
   agentSettings,
@@ -6,13 +6,17 @@ import {
   connectorSyncLogs,
   documentChunks,
   documents,
+  oauthStates,
   type OnboardingPhase,
   onboardingTracks,
   queryLogs,
   type RbacRole,
+  securityAuditLogs,
   semanticCache,
+  userConnectorConnections,
   userProgress,
   users,
+  webhookDeliveries,
 } from './schema.ts';
 import {
   computeDeterministicEmbedding,
@@ -20,8 +24,17 @@ import {
   generateEmbedding,
   type RetrievedChunk,
 } from '../lib/ai.ts';
-import { emitStructuredLog, recordCacheEvent } from '../lib/logger.ts';
-import { getAllowedTiersForRole, normalizeRbacRole } from '../lib/env.ts';
+import {
+  emitStructuredLog,
+  recordCacheEvent,
+  sanitizeAuditMetadata,
+} from '../lib/logger.ts';
+import {
+  getAllowedTiersForRole,
+  normalizeRbacRole,
+  parseStrictRbacRole,
+} from '../lib/env.ts';
+import { decryptSecret, encryptSecret, sha256Hex } from '../lib/oauth-crypto.ts';
 import type {
   ConnectorSyncLogItem,
   DocumentSourceType,
@@ -29,15 +42,93 @@ import type {
   HybridSearchMode,
   OnboardingPayload,
   OnboardingTrackItem,
+  SemanticCacheEntry,
+  SemanticCacheSummary,
   UserMilestoneProgress,
 } from '../types/app.ts';
 
 const CHUNK_SIZE = 900;
 const CHUNK_OVERLAP = 140;
 const SEMANTIC_CACHE_THRESHOLD = 0.94;
+export const CACHE_SCHEMA_VERSION = 2;
+
+export class PersistenceError extends Error {
+  readonly statusCode = 503;
+  readonly isPersistenceError = true;
+
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'PersistenceError';
+  }
+}
+
+export function isInMemoryFallbackAllowed(): boolean {
+  if (process.env.NODE_ENV === 'production') {
+    return false;
+  }
+  return process.env.HIPPOCAMPUS_ALLOW_IN_MEMORY_FALLBACK !== 'false';
+}
+
+function handlePersistenceFailure(operation: string, error: unknown): void {
+  emitStructuredLog({
+    level: 'error',
+    component: 'db',
+    event: 'db.persistence_error',
+    metadata: {
+      operation,
+      errorType: error instanceof Error ? error.name : 'UnknownError',
+      productionFailClosed: !isInMemoryFallbackAllowed(),
+    },
+    message: `PostgreSQL persistence failure during ${operation}`,
+  });
+
+  if (!isInMemoryFallbackAllowed()) {
+    throw new PersistenceError(
+      `Persistence service temporarily unavailable during ${operation}.`,
+      { cause: error }
+    );
+  }
+}
+
+function normalizeCacheQueryText(query: string): string {
+  return query.trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+export function computeSemanticCacheKey(params: {
+  role: RbacRole;
+  searchMode: HybridSearchMode;
+  query: string;
+}): string {
+  const normalized = normalizeCacheQueryText(params.query);
+  return sha256Hex(
+    `v${CACHE_SCHEMA_VERSION}|${params.role}|${params.searchMode}|${normalized}`
+  );
+}
+
+export function isCacheScopeCompatible(
+  entry: {
+    requiredRole: string;
+    searchMode: string;
+    cacheVersion?: number | null;
+  },
+  requester: {
+    role: RbacRole;
+    searchMode: HybridSearchMode;
+  }
+): boolean {
+  return (
+    entry.requiredRole === requester.role &&
+    entry.searchMode === requester.searchMode &&
+    (entry.cacheVersion ?? 1) === CACHE_SCHEMA_VERSION
+  );
+}
 
 interface MemoryCacheItem {
   id: number;
+  cacheKey: string;
+  requiredRole: RbacRole;
+  searchMode: HybridSearchMode;
+  cacheVersion: number;
   queryText: string;
   queryEmbedding: number[];
   answer: string;
@@ -45,6 +136,8 @@ interface MemoryCacheItem {
   confidence: number;
   toolCalls: AgentToolInvocation[];
   hitCount: number;
+  createdAt: Date;
+  lastHitAt: Date;
 }
 
 const memorySemanticCache = new Map<string, MemoryCacheItem>();
@@ -80,54 +173,180 @@ export function splitIntoChunks(
   return chunks.filter(Boolean);
 }
 
+export interface AppUserRecord {
+  id: number;
+  uid: string;
+  email: string;
+  displayName: string | null;
+  role: RbacRole;
+  createdAt: Date;
+}
+
+export async function getUserByUid(uid: string): Promise<AppUserRecord | null> {
+  try {
+    const rows = await db
+      .select()
+      .from(users)
+      .where(eq(users.uid, uid))
+      .limit(1);
+    const row = rows[0];
+    if (!row) return null;
+    const strictRole = parseStrictRbacRole(row.role);
+    if (!strictRole) return null;
+    return {
+      id: row.id,
+      uid: row.uid,
+      email: row.email,
+      displayName: row.displayName,
+      role: strictRole,
+      createdAt: row.createdAt,
+    };
+  } catch (error) {
+    handlePersistenceFailure('getUserByUid', error);
+    return fallbackStore.users.get(uid) ?? null;
+  }
+}
+
+export async function listUsers(): Promise<AppUserRecord[]> {
+  try {
+    const rows = await db.select().from(users).orderBy(asc(users.id));
+    return rows.map((row) => ({
+      id: row.id,
+      uid: row.uid,
+      email: row.email,
+      displayName: row.displayName,
+      role: normalizeRbacRole(row.role),
+      createdAt: row.createdAt,
+    }));
+  } catch (error) {
+    handlePersistenceFailure('listUsers', error);
+    return Array.from(fallbackStore.users.values());
+  }
+}
+
 export async function getOrCreateUser(
   uid: string,
   email: string,
   displayName?: string | null,
   role?: RbacRole
-) {
+): Promise<{ user: AppUserRecord; created: boolean }> {
+  const safeDefaultRole: RbacRole = role ?? 'Engineer';
+  const resolvedDisplayName = displayName || email.split('@')[0];
+
   try {
-    const result = await db
+    const existing = await getUserByUid(uid);
+    if (existing) {
+      const [updated] = await db
+        .update(users)
+        .set({
+          email,
+          displayName: resolvedDisplayName,
+          ...(role ? { role } : {}),
+        })
+        .where(eq(users.uid, uid))
+        .returning();
+
+      return {
+        created: false,
+        user: {
+          id: updated.id,
+          uid: updated.uid,
+          email: updated.email,
+          displayName: updated.displayName,
+          role: normalizeRbacRole(updated.role),
+          createdAt: updated.createdAt,
+        },
+      };
+    }
+
+    const [inserted] = await db
       .insert(users)
       .values({
         uid,
         email,
-        displayName: displayName || email.split('@')[0],
-        role: role || 'Admin',
-      })
-      .onConflictDoUpdate({
-        target: users.uid,
-        set: {
-          email,
-          displayName: displayName || email.split('@')[0],
-          ...(role ? { role } : {}),
-        },
+        displayName: resolvedDisplayName,
+        role: safeDefaultRole,
       })
       .returning();
 
-    return result[0];
+    return {
+      created: true,
+      user: {
+        id: inserted.id,
+        uid: inserted.uid,
+        email: inserted.email,
+        displayName: inserted.displayName,
+        role: normalizeRbacRole(inserted.role),
+        createdAt: inserted.createdAt,
+      },
+    };
   } catch (error) {
-    emitStructuredLog({
-      level: 'error',
-      component: 'db',
-      event: 'db.user_upsert_failed',
-      message: 'Database user upsert failed',
-    });
-    throw new Error('Failed to synchronize user account.', { cause: error });
+    handlePersistenceFailure('getOrCreateUser', error);
+    const existing = fallbackStore.users.get(uid);
+    if (existing) {
+      const updated: AppUserRecord = {
+        ...existing,
+        email,
+        displayName: resolvedDisplayName,
+        role: role ?? existing.role,
+      };
+      fallbackStore.users.set(uid, updated);
+      return { user: updated, created: false };
+    }
+    const createdRecord: AppUserRecord = {
+      id: fallbackStore.users.size + 1,
+      uid,
+      email,
+      displayName: resolvedDisplayName,
+      role: safeDefaultRole,
+      createdAt: new Date(),
+    };
+    fallbackStore.users.set(uid, createdRecord);
+    return { user: createdRecord, created: true };
   }
 }
 
-export async function updateUserRole(uid: string, role: RbacRole) {
+export async function updateUserRole(
+  uid: string,
+  role: RbacRole
+): Promise<AppUserRecord | null> {
+  const validatedRole = parseStrictRbacRole(role);
+  if (!validatedRole) {
+    throw new Error('Invalid RBAC role specified.');
+  }
   try {
     const [updated] = await db
       .update(users)
-      .set({ role })
+      .set({ role: validatedRole })
       .where(eq(users.uid, uid))
       .returning();
-    return updated;
+    if (!updated) return null;
+    return {
+      id: updated.id,
+      uid: updated.uid,
+      email: updated.email,
+      displayName: updated.displayName,
+      role: normalizeRbacRole(updated.role),
+      createdAt: updated.createdAt,
+    };
   } catch (error) {
-    throw new Error('Failed to update user RBAC role.', { cause: error });
+    handlePersistenceFailure('updateUserRole', error);
+    const existing = fallbackStore.users.get(uid);
+    if (!existing) return null;
+    const updated: AppUserRecord = { ...existing, role: validatedRole };
+    fallbackStore.users.set(uid, updated);
+    return updated;
   }
+}
+
+export function resetSecurityFallbackStoresForTesting(): void {
+  fallbackStore.users.clear();
+  fallbackStore.securityAuditLogs.length = 0;
+  fallbackStore.webhookDeliveries.clear();
+  fallbackStore.oauthStates.clear();
+  fallbackStore.userConnectorConnections.clear();
+  memorySemanticCache.clear();
+  seedPromise = null;
 }
 
 const INITIAL_DOCS: {
@@ -546,6 +765,7 @@ const fallbackStore = (() => {
 
   const progress: {
     id: number;
+    userUid: string | null;
     userHandle: string;
     displayName: string;
     engineerRole: string;
@@ -562,6 +782,7 @@ const fallbackStore = (() => {
       const isDone = eng.completedSortOrders.includes(track.sortOrder);
       progress.push({
         id: nextProgId++,
+        userUid: null,
         userHandle: eng.userHandle,
         displayName: eng.displayName,
         engineerRole: eng.engineerRole,
@@ -614,6 +835,11 @@ const fallbackStore = (() => {
     tracks,
     progress,
     connectorLogs,
+    users: new Map<string, AppUserRecord>(),
+    securityAuditLogs: [] as SecurityAuditLogRecord[],
+    webhookDeliveries: new Set<string>(),
+    oauthStates: new Map<string, OAuthStateRecord>(),
+    userConnectorConnections: new Map<string, StoredConnectorConnectionRecord>(),
     getNextDocId: () => nextDocId++,
     getNextChunkId: () => nextChunkId++,
     getNextProgId: () => nextProgId++,
@@ -710,8 +936,9 @@ export async function ensureSeedData(): Promise<void> {
           await db.insert(userProgress).values(progressRows);
         }
       }
-    } catch {
+    } catch (error) {
       seedPromise = null;
+      handlePersistenceFailure('ensureSeedData', error);
     }
   })();
 
@@ -720,7 +947,7 @@ export async function ensureSeedData(): Promise<void> {
 
 export async function lookupSemanticCache(
   query: string,
-  role: RbacRole = 'Admin',
+  role: RbacRole,
   searchMode: HybridSearchMode = 'hybrid_rrf'
 ): Promise<{
   hit: boolean;
@@ -730,61 +957,90 @@ export async function lookupSemanticCache(
   toolCalls?: AgentToolInvocation[];
   similarity?: number;
 }> {
-  try {
-    const scopedQuery = `[${role}:${searchMode}] ${query.trim().toLowerCase()}`;
-    const queryLocalVec = computeDeterministicEmbedding(scopedQuery, 64);
+  const normalizedQuery = normalizeCacheQueryText(query);
+  const queryLocalVec = computeDeterministicEmbedding(normalizedQuery, 64);
+  const expectedKey = computeSemanticCacheKey({ role, searchMode, query });
 
-    for (const item of memorySemanticCache.values()) {
-      const sim =
-        item.queryText.toLowerCase() === scopedQuery
-          ? 1.0
-          : cosineSimilarity(queryLocalVec, item.queryEmbedding);
-      if (sim >= SEMANTIC_CACHE_THRESHOLD) {
-        item.hitCount += 1;
-        recordCacheEvent(true, sim, query);
-        db.update(semanticCache)
+  // L1 memory lookup — strict authorization & searchMode scope predicate BEFORE similarity
+  for (const item of memorySemanticCache.values()) {
+    if (!isCacheScopeCompatible(item, { role, searchMode })) {
+      continue;
+    }
+    const sim =
+      item.cacheKey === expectedKey ||
+      normalizeCacheQueryText(item.queryText) === normalizedQuery
+        ? 1.0
+        : cosineSimilarity(queryLocalVec, item.queryEmbedding);
+    if (sim >= SEMANTIC_CACHE_THRESHOLD) {
+      item.hitCount += 1;
+      item.lastHitAt = new Date();
+      recordCacheEvent(true, sim, query);
+      try {
+        await db
+          .update(semanticCache)
           .set({
             hitCount: item.hitCount,
-            lastHitAt: new Date(),
+            lastHitAt: item.lastHitAt,
           })
-          .where(eq(semanticCache.id, item.id))
-          .catch(() => {});
-
-        return {
-          hit: true,
-          answer: item.answer,
-          sources: item.sources,
-          confidence: item.confidence,
-          toolCalls: item.toolCalls,
-          similarity: sim,
-        };
+          .where(eq(semanticCache.id, item.id));
+      } catch (error) {
+        handlePersistenceFailure('lookupSemanticCache.hitUpdate', error);
       }
-    }
 
+      return {
+        hit: true,
+        answer: item.answer,
+        sources: item.sources,
+        confidence: item.confidence,
+        toolCalls: item.toolCalls,
+        similarity: sim,
+      };
+    }
+  }
+
+  try {
+    // L2 PostgreSQL lookup — SQL WHERE enforces exact role + searchMode + v2 scope BEFORE fetch
     const cachedRows = await db
       .select()
       .from(semanticCache)
+      .where(
+        and(
+          eq(semanticCache.requiredRole, role),
+          eq(semanticCache.searchMode, searchMode),
+          eq(semanticCache.cacheVersion, CACHE_SCHEMA_VERSION)
+        )
+      )
       .orderBy(desc(semanticCache.lastHitAt))
       .limit(50);
 
     for (const row of cachedRows) {
+      // Defense-in-depth scope verification
+      if (!isCacheScopeCompatible(row, { role, searchMode })) {
+        continue;
+      }
       const storedVec = Array.isArray(row.queryEmbedding)
         ? row.queryEmbedding
         : [];
       const sim =
-        row.queryText.trim().toLowerCase() === scopedQuery
+        row.cacheKey === expectedKey ||
+        normalizeCacheQueryText(row.queryText) === normalizedQuery
           ? 1.0
           : cosineSimilarity(queryLocalVec, storedVec);
 
       if (sim >= SEMANTIC_CACHE_THRESHOLD) {
         const nextHits = (row.hitCount || 1) + 1;
+        const now = new Date();
         await db
           .update(semanticCache)
-          .set({ hitCount: nextHits, lastHitAt: new Date() })
+          .set({ hitCount: nextHits, lastHitAt: now })
           .where(eq(semanticCache.id, row.id));
 
-        memorySemanticCache.set(scopedQuery, {
+        memorySemanticCache.set(row.cacheKey, {
           id: row.id,
+          cacheKey: row.cacheKey,
+          requiredRole: normalizeRbacRole(row.requiredRole),
+          searchMode: row.searchMode as HybridSearchMode,
+          cacheVersion: row.cacheVersion,
           queryText: row.queryText,
           queryEmbedding: storedVec,
           answer: row.answer,
@@ -792,6 +1048,8 @@ export async function lookupSemanticCache(
           confidence: row.confidence,
           toolCalls: row.toolCalls || [],
           hitCount: nextHits,
+          createdAt: row.createdAt,
+          lastHitAt: now,
         });
 
         recordCacheEvent(true, sim, query);
@@ -808,58 +1066,103 @@ export async function lookupSemanticCache(
 
     recordCacheEvent(false, undefined, query);
     return { hit: false };
-  } catch {
+  } catch (error) {
+    handlePersistenceFailure('lookupSemanticCache', error);
+    recordCacheEvent(false, undefined, query);
     return { hit: false };
   }
 }
 
 export async function storeInSemanticCache(params: {
   query: string;
-  role?: RbacRole;
+  role: RbacRole;
   searchMode?: HybridSearchMode;
   answer: string;
   sources: string[];
   confidence: number;
   toolCalls?: AgentToolInvocation[];
 }) {
-  try {
-    if (params.sources.length === 0 && (params.toolCalls?.length ?? 0) === 0)
-      return;
-    const role = params.role || 'Admin';
-    const mode = params.searchMode || 'hybrid_rrf';
-    const scopedQuery = `[${role}:${mode}] ${params.query.trim()}`;
-    const localVec = computeDeterministicEmbedding(
-      scopedQuery.toLowerCase(),
-      64
-    );
+  if (params.sources.length === 0 && (params.toolCalls?.length ?? 0) === 0) {
+    return;
+  }
+  const role = params.role;
+  const searchMode: HybridSearchMode = params.searchMode || 'hybrid_rrf';
+  const normalizedQuery = normalizeCacheQueryText(params.query);
+  const cacheKey = computeSemanticCacheKey({
+    role,
+    searchMode,
+    query: params.query,
+  });
+  const localVec = computeDeterministicEmbedding(normalizedQuery, 64);
+  const now = new Date();
 
-    const [inserted] = await db
+  try {
+    const [upserted] = await db
       .insert(semanticCache)
       .values({
-        queryText: scopedQuery,
+        cacheKey,
+        requiredRole: role,
+        searchMode,
+        cacheVersion: CACHE_SCHEMA_VERSION,
+        queryText: normalizedQuery,
         queryEmbedding: localVec,
         answer: params.answer,
         sources: params.sources,
         confidence: params.confidence,
         toolCalls: params.toolCalls ?? [],
         hitCount: 1,
+        lastHitAt: now,
+      })
+      .onConflictDoUpdate({
+        target: semanticCache.cacheKey,
+        set: {
+          queryText: normalizedQuery,
+          queryEmbedding: localVec,
+          answer: params.answer,
+          sources: params.sources,
+          confidence: params.confidence,
+          toolCalls: params.toolCalls ?? [],
+          lastHitAt: now,
+        },
       })
       .returning();
 
-    if (inserted) {
-      memorySemanticCache.set(scopedQuery.toLowerCase(), {
-        id: inserted.id,
-        queryText: inserted.queryText,
+    if (upserted) {
+      memorySemanticCache.set(cacheKey, {
+        id: upserted.id,
+        cacheKey,
+        requiredRole: role,
+        searchMode,
+        cacheVersion: CACHE_SCHEMA_VERSION,
+        queryText: upserted.queryText,
         queryEmbedding: localVec,
-        answer: inserted.answer,
-        sources: inserted.sources,
-        confidence: inserted.confidence,
-        toolCalls: inserted.toolCalls || [],
-        hitCount: 1,
+        answer: upserted.answer,
+        sources: upserted.sources,
+        confidence: upserted.confidence,
+        toolCalls: upserted.toolCalls || [],
+        hitCount: upserted.hitCount,
+        createdAt: upserted.createdAt,
+        lastHitAt: upserted.lastHitAt,
       });
     }
-  } catch {
-    // Non-blocking cache write
+  } catch (error) {
+    handlePersistenceFailure('storeInSemanticCache', error);
+    memorySemanticCache.set(cacheKey, {
+      id: memorySemanticCache.size + 1,
+      cacheKey,
+      requiredRole: role,
+      searchMode,
+      cacheVersion: CACHE_SCHEMA_VERSION,
+      queryText: normalizedQuery,
+      queryEmbedding: localVec,
+      answer: params.answer,
+      sources: params.sources,
+      confidence: params.confidence,
+      toolCalls: params.toolCalls ?? [],
+      hitCount: 1,
+      createdAt: now,
+      lastHitAt: now,
+    });
   }
 }
 
@@ -867,8 +1170,8 @@ export async function purgeSemanticCache() {
   memorySemanticCache.clear();
   try {
     await db.delete(semanticCache);
-  } catch {
-    // Fallback to L1 memory cache clear
+  } catch (error) {
+    handlePersistenceFailure('purgeSemanticCache', error);
   }
   emitStructuredLog({
     level: 'info',
@@ -879,30 +1182,110 @@ export async function purgeSemanticCache() {
   return { purged: true };
 }
 
-export async function getSemanticCacheEntries() {
+/**
+ * Mission 001.6 (AUD-002): RBAC-safe, metadata-only semantic cache telemetry.
+ * - Never returns cached answer bodies, query embeddings, or raw document content.
+ * - Managers receive ONLY aggregated non-Admin metrics (zero Admin entries or counts).
+ * - Admins receive aggregated metrics across all tiers + redacted metadata-only entries.
+ */
+export async function getSemanticCacheTelemetry(role: RbacRole): Promise<{
+  summary: SemanticCacheSummary;
+  entries: SemanticCacheEntry[];
+}> {
+  const allowedTiers = getAllowedTiersForRole(role);
+  const isAdmin = role === 'Admin';
+
+  let rows: Array<{
+    id: number;
+    cacheKey: string;
+    requiredRole: string;
+    searchMode: string;
+    cacheVersion: number;
+    sources: string[];
+    confidence: number;
+    hitCount: number;
+    createdAt: Date;
+    lastHitAt: Date;
+  }> = [];
+
   try {
-    return await db
-      .select()
+    const dbRows = await db
+      .select({
+        id: semanticCache.id,
+        cacheKey: semanticCache.cacheKey,
+        requiredRole: semanticCache.requiredRole,
+        searchMode: semanticCache.searchMode,
+        cacheVersion: semanticCache.cacheVersion,
+        sources: semanticCache.sources,
+        confidence: semanticCache.confidence,
+        hitCount: semanticCache.hitCount,
+        createdAt: semanticCache.createdAt,
+        lastHitAt: semanticCache.lastHitAt,
+      })
       .from(semanticCache)
+      .where(
+        and(
+          inArray(semanticCache.requiredRole, allowedTiers),
+          eq(semanticCache.cacheVersion, CACHE_SCHEMA_VERSION)
+        )
+      )
       .orderBy(desc(semanticCache.lastHitAt))
-      .limit(20);
-  } catch {
-    return Array.from(memorySemanticCache.values()).map((item) => ({
-      id: item.id,
-      queryText: item.queryText,
-      queryEmbedding: item.queryEmbedding,
-      answer: item.answer,
-      sources: item.sources,
-      confidence: item.confidence,
-      toolCalls: item.toolCalls,
-      hitCount: item.hitCount,
-      lastHitAt: new Date(),
-      createdAt: new Date(),
-    }));
+      .limit(100);
+    rows = dbRows;
+  } catch (error) {
+    handlePersistenceFailure('getSemanticCacheTelemetry', error);
+    rows = Array.from(memorySemanticCache.values())
+      .filter(
+        (item) =>
+          allowedTiers.includes(item.requiredRole) &&
+          item.cacheVersion === CACHE_SCHEMA_VERSION
+      )
+      .sort((a, b) => b.lastHitAt.getTime() - a.lastHitAt.getTime());
   }
+
+  const byRole: Record<string, number> = {
+    Engineer: 0,
+    Manager: 0,
+    ...(isAdmin ? { Admin: 0 } : {}),
+  };
+
+  let totalHits = 0;
+  for (const row of rows) {
+    const tier = normalizeRbacRole(row.requiredRole);
+    if (tier === 'Admin' && !isAdmin) continue;
+    byRole[tier] = (byRole[tier] ?? 0) + 1;
+    totalHits += row.hitCount || 0;
+  }
+
+  const summary: SemanticCacheSummary = {
+    totalEntries: rows.length,
+    totalHits,
+    byRole,
+  };
+
+  if (!isAdmin) {
+    return {
+      summary,
+      entries: [],
+    };
+  }
+
+  const entries: SemanticCacheEntry[] = rows.slice(0, 20).map((row) => ({
+    id: row.id,
+    cacheKeyPrefix: row.cacheKey.slice(0, 12),
+    requiredRole: normalizeRbacRole(row.requiredRole),
+    searchMode: row.searchMode as HybridSearchMode,
+    confidence: row.confidence,
+    sourceCount: Array.isArray(row.sources) ? row.sources.length : 0,
+    hitCount: row.hitCount,
+    createdAt: row.createdAt.toISOString(),
+    lastHitAt: row.lastHitAt.toISOString(),
+  }));
+
+  return { summary, entries };
 }
 
-export async function getDocumentsList(role: RbacRole = 'Admin') {
+export async function getDocumentsList(role: RbacRole) {
   const allowedTiers = getAllowedTiersForRole(role);
   try {
     await ensureSeedData();
@@ -911,7 +1294,8 @@ export async function getDocumentsList(role: RbacRole = 'Admin') {
       .from(documents)
       .where(inArray(documents.accessLevel, allowedTiers))
       .orderBy(desc(documents.createdAt));
-  } catch {
+  } catch (error) {
+    handlePersistenceFailure('getDocumentsList', error);
     return fallbackStore.docs.filter((d) =>
       allowedTiers.includes(d.accessLevel)
     );
@@ -950,7 +1334,13 @@ export async function ingestDocument(params: {
       })
       .returning();
 
-    const chunkRecords = [];
+    const chunkRecords: Array<{
+      documentId: number;
+      chunkIndex: number;
+      content: string;
+      embedding: number[];
+      metadata: Record<string, unknown>;
+    }> = [];
     for (let i = 0; i < chunks.length; i++) {
       const chunkText = chunks[i];
       const embedding = await generateEmbedding(`${params.title}\n${chunkText}`);
@@ -969,7 +1359,8 @@ export async function ingestDocument(params: {
 
     await purgeSemanticCache();
     return createdDoc;
-  } catch {
+  } catch (error) {
+    handlePersistenceFailure('ingestDocument', error);
     const newDoc: FallbackDocRow = {
       id: fallbackStore.getNextDocId(),
       userId: params.userId ?? null,
@@ -1004,7 +1395,8 @@ export async function ingestDocument(params: {
 export async function deleteDocumentById(id: number) {
   try {
     await db.delete(documents).where(eq(documents.id, id));
-  } catch {
+  } catch (error) {
+    handlePersistenceFailure('deleteDocumentById', error);
     const idx = fallbackStore.docs.findIndex((d) => d.id === id);
     if (idx >= 0) fallbackStore.docs.splice(idx, 1);
   }
@@ -1079,7 +1471,7 @@ export function rankCandidateChunks(
   const {
     topK = 5,
     searchMode = 'hybrid_rrf',
-    role = 'Admin',
+    role = 'Engineer',
     queryGeminiVec,
     queryLocalVec: providedLocalVec,
     rrfAlpha = 0.65,
@@ -1293,7 +1685,7 @@ export async function searchKnowledgeChunks(
   query: string,
   topK = 4,
   searchMode: HybridSearchMode = 'hybrid_rrf',
-  role: RbacRole = 'Admin'
+  role: RbacRole = 'Engineer'
 ): Promise<(RetrievedChunk & { accessLevel: RbacRole })[]> {
   const allowedTiers = getAllowedTiersForRole(role);
   let allChunks: CandidateChunkInput[] = [];
@@ -1323,7 +1715,8 @@ export async function searchKnowledgeChunks(
       sourceType: r.sourceType,
       accessLevel: r.accessLevel,
     }));
-  } catch {
+  } catch (error) {
+    handlePersistenceFailure('searchKnowledgeChunks', error);
     const docMap = new Map(fallbackStore.docs.map((d) => [d.id, d]));
     const mapped: CandidateChunkInput[] = [];
     for (const c of fallbackStore.chunks) {
@@ -1403,10 +1796,11 @@ export async function recordQueryLog(entry: {
       })
       .returning();
     return created;
-  } catch {
+  } catch (error) {
+    handlePersistenceFailure('recordQueryLog', error);
     const fallbackItem = {
       id: fallbackStore.logs.length + 1,
-      userHandle: entry.userHandle || '@workspace-admin',
+      userHandle: entry.userHandle || '@workspace-engineer',
       channel: entry.channel || 'Playground',
       query: entry.query,
       answer: entry.answer,
@@ -1431,7 +1825,7 @@ export async function recordQueryLog(entry: {
   }
 }
 
-export async function getRecentQueryLogs(role: RbacRole = 'Admin') {
+export async function getRecentQueryLogs(role: RbacRole) {
   const allowedTiers = getAllowedTiersForRole(role);
   try {
     await ensureSeedData();
@@ -1441,7 +1835,8 @@ export async function getRecentQueryLogs(role: RbacRole = 'Admin') {
       .where(inArray(queryLogs.requiredRole, allowedTiers))
       .orderBy(desc(queryLogs.createdAt))
       .limit(50);
-  } catch {
+  } catch (error) {
+    handlePersistenceFailure('getRecentQueryLogs', error);
     return fallbackStore.logs.filter((l) =>
       allowedTiers.includes(l.requiredRole)
     );
@@ -1452,7 +1847,8 @@ export async function getAgentSettingsList() {
   try {
     await ensureSeedData();
     return await db.select().from(agentSettings).orderBy(agentSettings.id);
-  } catch {
+  } catch (error) {
+    handlePersistenceFailure('getAgentSettingsList', error);
     return fallbackStore.settings;
   }
 }
@@ -1465,7 +1861,8 @@ export async function updateAgentSettingByKey(key: string, enabled: boolean) {
       .where(eq(agentSettings.key, key))
       .returning();
     return updated;
-  } catch {
+  } catch (error) {
+    handlePersistenceFailure('updateAgentSettingByKey', error);
     const found = fallbackStore.settings.find((s) => s.key === key);
     if (found) {
       found.enabled = enabled;
@@ -1475,7 +1872,7 @@ export async function updateAgentSettingByKey(key: string, enabled: boolean) {
   }
 }
 
-export async function getOverviewPayload(role: RbacRole = 'Admin') {
+export async function getOverviewPayload(role: RbacRole) {
   const allowedTiers = getAllowedTiersForRole(role);
   try {
     await ensureSeedData();
@@ -1494,10 +1891,16 @@ export async function getOverviewPayload(role: RbacRole = 'Admin') {
         .limit(30),
       db.select().from(agentSettings).orderBy(agentSettings.id),
       db
-        .select()
+        .select({ id: semanticCache.id })
         .from(semanticCache)
+        .where(
+          and(
+            inArray(semanticCache.requiredRole, allowedTiers),
+            eq(semanticCache.cacheVersion, CACHE_SCHEMA_VERSION)
+          )
+        )
         .orderBy(desc(semanticCache.lastHitAt))
-        .limit(15),
+        .limit(50),
     ]);
 
     const totalChunks = allDocs.reduce((acc, doc) => acc + doc.chunkCount, 0);
@@ -1532,13 +1935,19 @@ export async function getOverviewPayload(role: RbacRole = 'Admin') {
       settings,
       activeRole: role,
     };
-  } catch {
+  } catch (error) {
+    handlePersistenceFailure('getOverviewPayload', error);
     const allDocs = fallbackStore.docs.filter((d) =>
       allowedTiers.includes(d.accessLevel)
     );
     const allLogs = fallbackStore.logs.filter((l) =>
       allowedTiers.includes(l.requiredRole)
     );
+    const scopedCacheCount = Array.from(memorySemanticCache.values()).filter(
+      (c) =>
+        allowedTiers.includes(c.requiredRole) &&
+        c.cacheVersion === CACHE_SCHEMA_VERSION
+    ).length;
     const totalChunks = allDocs.reduce((acc, doc) => acc + doc.chunkCount, 0);
     return {
       stats: {
@@ -1547,7 +1956,7 @@ export async function getOverviewPayload(role: RbacRole = 'Admin') {
         totalQueries: allLogs.length,
         avgConfidence: 96.0,
         avgLatencyMs: 840,
-        cachedQueriesCount: memorySemanticCache.size,
+        cachedQueriesCount: scopedCacheCount,
       },
       recentDocuments: allDocs.slice(0, 6),
       recentLogs: allLogs.slice(0, 8),
@@ -1557,13 +1966,111 @@ export async function getOverviewPayload(role: RbacRole = 'Admin') {
   }
 }
 
+function buildCohortSummaries(
+  tracks: OnboardingTrackItem[],
+  progressRows: Array<{
+    userUid: string | null;
+    userHandle: string;
+    displayName: string;
+    engineerRole: string;
+    trackId: number;
+    completed: boolean;
+    completedAt: Date | null;
+    assignedBy: string;
+    notes: string | null;
+    updatedAt: Date | null;
+  }>
+): EngineerCohortSummary[] {
+  const groupMap = new Map<
+    string,
+    {
+      userUid: string | null;
+      userHandle: string;
+      displayName: string;
+      engineerRole: string;
+      lastUpdatedAt: string | null;
+      progressByTrackId: Record<number, UserMilestoneProgress>;
+    }
+  >();
+
+  for (const row of progressRows) {
+    const groupKey = row.userUid
+      ? `uid:${row.userUid}`
+      : `handle:${row.userHandle.toLowerCase()}`;
+    let entry = groupMap.get(groupKey);
+    if (!entry) {
+      entry = {
+        userUid: row.userUid,
+        userHandle: row.userHandle,
+        displayName: row.displayName,
+        engineerRole: row.engineerRole,
+        lastUpdatedAt: row.updatedAt ? row.updatedAt.toISOString() : null,
+        progressByTrackId: {},
+      };
+      groupMap.set(groupKey, entry);
+    }
+
+    if (
+      row.updatedAt &&
+      (!entry.lastUpdatedAt ||
+        row.updatedAt.toISOString() > entry.lastUpdatedAt)
+    ) {
+      entry.lastUpdatedAt = row.updatedAt.toISOString();
+    }
+
+    entry.progressByTrackId[row.trackId] = {
+      trackId: row.trackId,
+      completed: row.completed,
+      completedAt: row.completedAt ? row.completedAt.toISOString() : null,
+      assignedBy: row.assignedBy,
+      notes: row.notes,
+    };
+  }
+
+  const day1Tracks = tracks.filter((t) => t.phase === 'Day 1');
+  const week1Tracks = tracks.filter((t) => t.phase === 'Week 1');
+  const month1Tracks = tracks.filter((t) => t.phase === 'Month 1');
+
+  return Array.from(groupMap.values()).map((eng) => {
+    const countCompleted = (subset: OnboardingTrackItem[]) =>
+      subset.filter((t) => eng.progressByTrackId[t.id]?.completed).length;
+
+    const completedCount = countCompleted(tracks);
+    const totalCount = tracks.length;
+    const completionRate =
+      totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
+
+    return {
+      userUid: eng.userUid ?? undefined,
+      userHandle: eng.userHandle,
+      displayName: eng.displayName,
+      engineerRole: eng.engineerRole,
+      completedCount,
+      totalCount,
+      completionRate,
+      day1Completed: countCompleted(day1Tracks),
+      day1Total: day1Tracks.length,
+      week1Completed: countCompleted(week1Tracks),
+      week1Total: week1Tracks.length,
+      month1Completed: countCompleted(month1Tracks),
+      month1Total: month1Tracks.length,
+      lastUpdatedAt: eng.lastUpdatedAt,
+      progressByTrackId: eng.progressByTrackId,
+    };
+  });
+}
+
 /**
- * Phase 4 Step 1: Interactive Onboarding Checklists & Manager Cohort Queries
+ * Mission 001.6 (AUD-013): Immutable userUid-isolated Onboarding Checklists & Manager Cohort Queries.
+ * - Engineers strictly see ONLY rows matching their immutable `userUid` (NEVER email local-part).
+ * - Never falls back to `fullCohort.slice(0, 1)`; missing progress returns `cohort: []`.
  */
-export async function getOnboardingPayload(
-  activeUserHandle = '@alex.chen',
-  role: RbacRole = 'Admin'
-): Promise<OnboardingPayload> {
+export async function getOnboardingPayload(params: {
+  userUid: string;
+  userHandle: string;
+  role: RbacRole;
+}): Promise<OnboardingPayload> {
+  const { userUid, userHandle, role } = params;
   try {
     await ensureSeedData();
 
@@ -1586,124 +2093,25 @@ export async function getOnboardingPayload(
       createdAt: t.createdAt.toISOString(),
     }));
 
-    let allProgress = await db.select().from(userProgress);
-
-    // Ensure the active userHandle exists in userProgress so signed-in users immediately have a track
-    const hasActiveUser = allProgress.some(
-      (p) => p.userHandle.toLowerCase() === activeUserHandle.toLowerCase()
-    );
-    if (!hasActiveUser && tracks.length > 0) {
-      const displayName = activeUserHandle
-        .replace(/^@/, '')
-        .split(/[._-]/)
-        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-        .join(' ');
-      const newRows = tracks.map((t, index) => ({
-        userHandle: activeUserHandle,
-        displayName: displayName || 'Workspace Engineer',
-        engineerRole: 'Full-Stack Engineer',
-        trackId: t.id,
-        completed: index < 2,
-        completedAt: index < 2 ? new Date() : null,
-        assignedBy: '@elena.rostova',
-        notes: null,
-      }));
-      await db.insert(userProgress).values(newRows);
-      allProgress = await db.select().from(userProgress);
-    }
-
-    // Group progress by engineer handle
-    const handleMap = new Map<
-      string,
-      {
-        userHandle: string;
-        displayName: string;
-        engineerRole: string;
-        lastUpdatedAt: string | null;
-        progressByTrackId: Record<number, UserMilestoneProgress>;
-      }
-    >();
-
-    for (const row of allProgress) {
-      let entry = handleMap.get(row.userHandle);
-      if (!entry) {
-        entry = {
-          userHandle: row.userHandle,
-          displayName: row.displayName,
-          engineerRole: row.engineerRole,
-          lastUpdatedAt: row.updatedAt ? row.updatedAt.toISOString() : null,
-          progressByTrackId: {},
-        };
-        handleMap.set(row.userHandle, entry);
-      }
-
-      if (
-        row.updatedAt &&
-        (!entry.lastUpdatedAt ||
-          row.updatedAt.toISOString() > entry.lastUpdatedAt)
-      ) {
-        entry.lastUpdatedAt = row.updatedAt.toISOString();
-      }
-
-      entry.progressByTrackId[row.trackId] = {
-        trackId: row.trackId,
-        completed: row.completed,
-        completedAt: row.completedAt ? row.completedAt.toISOString() : null,
-        assignedBy: row.assignedBy,
-        notes: row.notes,
-      };
-    }
-
-    const day1Tracks = tracks.filter((t) => t.phase === 'Day 1');
-    const week1Tracks = tracks.filter((t) => t.phase === 'Week 1');
-    const month1Tracks = tracks.filter((t) => t.phase === 'Month 1');
-
-    const fullCohort: EngineerCohortSummary[] = Array.from(
-      handleMap.values()
-    ).map((eng) => {
-      const countCompleted = (subset: OnboardingTrackItem[]) =>
-        subset.filter((t) => eng.progressByTrackId[t.id]?.completed).length;
-
-      const completedCount = countCompleted(tracks);
-      const totalCount = tracks.length;
-      const completionRate =
-        totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
-
-      return {
-        userHandle: eng.userHandle,
-        displayName: eng.displayName,
-        engineerRole: eng.engineerRole,
-        completedCount,
-        totalCount,
-        completionRate,
-        day1Completed: countCompleted(day1Tracks),
-        day1Total: day1Tracks.length,
-        week1Completed: countCompleted(week1Tracks),
-        week1Total: week1Tracks.length,
-        month1Completed: countCompleted(month1Tracks),
-        month1Total: month1Tracks.length,
-        lastUpdatedAt: eng.lastUpdatedAt,
-        progressByTrackId: eng.progressByTrackId,
-      };
-    });
-
-    // RBAC Filtering: Engineer only sees their own checklist; Manager/Admin sees full cohort
-    const filteredCohort =
+    const scopedProgress =
       role === 'Engineer'
-        ? fullCohort.filter(
-            (c) =>
-              c.userHandle.toLowerCase() === activeUserHandle.toLowerCase()
-          )
-        : fullCohort;
+        ? await db
+            .select()
+            .from(userProgress)
+            .where(eq(userProgress.userUid, userUid))
+        : await db.select().from(userProgress);
+
+    const cohort = buildCohortSummaries(tracks, scopedProgress);
 
     return {
-      activeUserHandle,
+      activeUserUid: userUid,
+      activeUserHandle: userHandle,
       activeRole: role,
       tracks,
-      cohort:
-        filteredCohort.length > 0 ? filteredCohort : fullCohort.slice(0, 1),
+      cohort,
     };
-  } catch {
+  } catch (error) {
+    handlePersistenceFailure('getOnboardingPayload', error);
     const tracks: OnboardingTrackItem[] = fallbackStore.tracks.map((t) => ({
       id: t.id,
       phase: t.phase,
@@ -1718,61 +2126,25 @@ export async function getOnboardingPayload(
       createdAt: t.createdAt.toISOString(),
     }));
 
-    const day1Tracks = tracks.filter((t) => t.phase === 'Day 1');
-    const week1Tracks = tracks.filter((t) => t.phase === 'Week 1');
-    const month1Tracks = tracks.filter((t) => t.phase === 'Month 1');
+    const scopedProgress =
+      role === 'Engineer'
+        ? fallbackStore.progress.filter((p) => p.userUid === userUid)
+        : fallbackStore.progress;
 
-    const fullCohort: EngineerCohortSummary[] = INITIAL_COHORT_ENGINEERS.map(
-      (eng) => {
-        const progressByTrackId: Record<number, UserMilestoneProgress> = {};
-        for (const t of tracks) {
-          const done = eng.completedSortOrders.includes(t.sortOrder);
-          progressByTrackId[t.id] = {
-            trackId: t.id,
-            completed: done,
-            completedAt: done ? new Date().toISOString() : null,
-            assignedBy: '@elena.rostova',
-            notes: null,
-          };
-        }
-        const countCompleted = (subset: OnboardingTrackItem[]) =>
-          subset.filter((t) => progressByTrackId[t.id]?.completed).length;
-        const completedCount = countCompleted(tracks);
-        return {
-          userHandle: eng.userHandle,
-          displayName: eng.displayName,
-          engineerRole: eng.engineerRole,
-          completedCount,
-          totalCount: tracks.length,
-          completionRate: Math.round((completedCount / tracks.length) * 100),
-          day1Completed: countCompleted(day1Tracks),
-          day1Total: day1Tracks.length,
-          week1Completed: countCompleted(week1Tracks),
-          week1Total: week1Tracks.length,
-          month1Completed: countCompleted(month1Tracks),
-          month1Total: month1Tracks.length,
-          lastUpdatedAt: new Date().toISOString(),
-          progressByTrackId,
-        };
-      }
-    );
+    const cohort = buildCohortSummaries(tracks, scopedProgress);
 
     return {
-      activeUserHandle,
+      activeUserUid: userUid,
+      activeUserHandle: userHandle,
       activeRole: role,
       tracks,
-      cohort:
-        role === 'Engineer'
-          ? fullCohort.filter(
-              (c) =>
-                c.userHandle.toLowerCase() === activeUserHandle.toLowerCase()
-            )
-          : fullCohort,
+      cohort,
     };
   }
 }
 
 export async function toggleOnboardingMilestone(params: {
+  userUid?: string | null;
   userHandle: string;
   displayName?: string;
   engineerRole?: string;
@@ -1783,16 +2155,28 @@ export async function toggleOnboardingMilestone(params: {
 }) {
   try {
     await ensureSeedData();
-    const existing = await db
-      .select()
-      .from(userProgress)
-      .where(
-        and(
-          eq(userProgress.userHandle, params.userHandle),
-          eq(userProgress.trackId, params.trackId)
-        )
-      )
-      .limit(1);
+    const existing = params.userUid
+      ? await db
+          .select()
+          .from(userProgress)
+          .where(
+            and(
+              eq(userProgress.userUid, params.userUid),
+              eq(userProgress.trackId, params.trackId)
+            )
+          )
+          .limit(1)
+      : await db
+          .select()
+          .from(userProgress)
+          .where(
+            and(
+              eq(userProgress.userHandle, params.userHandle),
+              isNull(userProgress.userUid),
+              eq(userProgress.trackId, params.trackId)
+            )
+          )
+          .limit(1);
 
     if (existing.length > 0) {
       const [updated] = await db
@@ -1813,6 +2197,7 @@ export async function toggleOnboardingMilestone(params: {
     const [inserted] = await db
       .insert(userProgress)
       .values({
+        userUid: params.userUid ?? null,
         userHandle: params.userHandle,
         displayName: params.displayName || params.userHandle.replace(/^@/, ''),
         engineerRole: params.engineerRole || 'Software Engineer',
@@ -1825,9 +2210,31 @@ export async function toggleOnboardingMilestone(params: {
       .returning();
 
     return inserted;
-  } catch {
-    return {
+  } catch (error) {
+    handlePersistenceFailure('toggleOnboardingMilestone', error);
+    const matchIndex = fallbackStore.progress.findIndex((p) =>
+      params.userUid
+        ? p.userUid === params.userUid && p.trackId === params.trackId
+        : p.userUid === null &&
+          p.userHandle === params.userHandle &&
+          p.trackId === params.trackId
+    );
+    if (matchIndex >= 0) {
+      const current = fallbackStore.progress[matchIndex];
+      const updated = {
+        ...current,
+        completed: params.completed,
+        completedAt: params.completed ? new Date() : null,
+        notes: params.notes !== undefined ? params.notes : current.notes,
+        updatedAt: new Date(),
+      };
+      fallbackStore.progress[matchIndex] = updated;
+      return updated;
+    }
+
+    const inserted = {
       id: fallbackStore.getNextProgId(),
+      userUid: params.userUid ?? null,
       userHandle: params.userHandle,
       displayName: params.displayName || params.userHandle.replace(/^@/, ''),
       engineerRole: params.engineerRole || 'Software Engineer',
@@ -1838,6 +2245,8 @@ export async function toggleOnboardingMilestone(params: {
       notes: params.notes ?? null,
       updatedAt: new Date(),
     };
+    fallbackStore.progress.push(inserted);
+    return inserted;
   }
 }
 
@@ -1875,7 +2284,8 @@ export async function createOnboardingTrack(params: {
       .returning();
 
     return created;
-  } catch {
+  } catch (error) {
+    handlePersistenceFailure('createOnboardingTrack', error);
     const created = {
       id: fallbackStore.tracks.length + 1,
       phase: params.phase,
@@ -1968,7 +2378,13 @@ export async function upsertConnectorDocument(params: {
       targetDocId = createdDoc.id;
     }
 
-    const chunkRecords = [];
+    const chunkRecords: Array<{
+      documentId: number;
+      chunkIndex: number;
+      content: string;
+      embedding: number[];
+      metadata: Record<string, unknown>;
+    }> = [];
     for (let i = 0; i < chunks.length; i++) {
       const chunkText = chunks[i];
       const embedding = await generateEmbedding(`${cleanTitle}\n${chunkText}`);
@@ -1998,7 +2414,8 @@ export async function upsertConnectorDocument(params: {
       chunksUpserted: chunkRecords.length,
       action,
     };
-  } catch {
+  } catch (error) {
+    handlePersistenceFailure('upsertConnectorDocument', error);
     const docId = fallbackStore.getNextDocId();
     fallbackStore.docs.unshift({
       id: docId,
@@ -2063,7 +2480,8 @@ export async function recordConnectorSyncLog(params: {
       .returning();
 
     return inserted;
-  } catch {
+  } catch (error) {
+    handlePersistenceFailure('recordConnectorSyncLog', error);
     const item: ConnectorSyncLogItem = {
       id: fallbackStore.connectorLogs.length + 1,
       provider: params.provider,
@@ -2138,8 +2556,473 @@ export async function getConnectorSyncLogs(): Promise<ConnectorSyncLogItem[]> {
       details: r.details,
       createdAt: r.createdAt.toISOString(),
     }));
-  } catch {
+  } catch (error) {
+    handlePersistenceFailure('getConnectorSyncLogs', error);
     return fallbackStore.connectorLogs;
   }
 }
+
+/**
+ * Mission 001 + 001.6 (AUD-003, AUD-014): Persistent Append-Only Security Audit Logging
+ */
+export interface SecurityAuditLogRecord {
+  id: number;
+  actorUid: string;
+  actorEmail: string | null;
+  actorRole: string;
+  action: string;
+  targetResource: string;
+  outcome: 'success' | 'denied' | 'failure';
+  requestId: string | null;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+}
+
+export async function recordSecurityAuditEvent(params: {
+  actorUid: string;
+  actorEmail?: string | null;
+  actorRole: string;
+  action: string;
+  targetResource: string;
+  outcome: 'success' | 'denied' | 'failure';
+  requestId?: string | null;
+  metadata?: Record<string, unknown>;
+}): Promise<SecurityAuditLogRecord> {
+  const safeMetadata = sanitizeAuditMetadata(params.metadata || {});
+  const level =
+    params.outcome === 'success'
+      ? 'info'
+      : params.outcome === 'denied'
+        ? 'warn'
+        : 'error';
+
+  emitStructuredLog({
+    level,
+    component: 'api',
+    event: `audit.${params.action}`,
+    requestId: params.requestId ?? undefined,
+    metadata: {
+      actorUid: params.actorUid,
+      actorRole: params.actorRole,
+      targetResource: params.targetResource,
+      outcome: params.outcome,
+      ...safeMetadata,
+    },
+    message: `[AUDIT] ${params.action} (${params.outcome}) actor=${params.actorUid} role=${params.actorRole} target=${params.targetResource}`,
+  });
+
+  try {
+    const [inserted] = await db
+      .insert(securityAuditLogs)
+      .values({
+        actorUid: params.actorUid,
+        actorEmail: params.actorEmail ?? null,
+        actorRole: params.actorRole,
+        action: params.action,
+        targetResource: params.targetResource,
+        outcome: params.outcome,
+        requestId: params.requestId ?? null,
+        metadata: safeMetadata,
+      })
+      .returning();
+
+    return {
+      id: inserted.id,
+      actorUid: inserted.actorUid,
+      actorEmail: inserted.actorEmail,
+      actorRole: inserted.actorRole,
+      action: inserted.action,
+      targetResource: inserted.targetResource,
+      outcome: inserted.outcome as 'success' | 'denied' | 'failure',
+      requestId: inserted.requestId,
+      metadata: (inserted.metadata as Record<string, unknown>) || {},
+      createdAt: inserted.createdAt.toISOString(),
+    };
+  } catch (error) {
+    handlePersistenceFailure('recordSecurityAuditEvent', error);
+    const entry: SecurityAuditLogRecord = {
+      id: fallbackStore.securityAuditLogs.length + 1,
+      actorUid: params.actorUid,
+      actorEmail: params.actorEmail ?? null,
+      actorRole: params.actorRole,
+      action: params.action,
+      targetResource: params.targetResource,
+      outcome: params.outcome,
+      requestId: params.requestId ?? null,
+      metadata: safeMetadata,
+      createdAt: new Date().toISOString(),
+    };
+    fallbackStore.securityAuditLogs.unshift(entry);
+    if (fallbackStore.securityAuditLogs.length > 500) {
+      fallbackStore.securityAuditLogs.pop();
+    }
+    return entry;
+  }
+}
+
+export async function getSecurityAuditLogs(
+  limit = 100
+): Promise<SecurityAuditLogRecord[]> {
+  const safeLimit = Math.min(Math.max(1, limit), 250);
+  try {
+    const rows = await db
+      .select()
+      .from(securityAuditLogs)
+      .orderBy(desc(securityAuditLogs.createdAt))
+      .limit(safeLimit);
+
+    return rows.map((r) => ({
+      id: r.id,
+      actorUid: r.actorUid,
+      actorEmail: r.actorEmail,
+      actorRole: r.actorRole,
+      action: r.action,
+      targetResource: r.targetResource,
+      outcome: r.outcome as 'success' | 'denied' | 'failure',
+      requestId: r.requestId,
+      metadata: (r.metadata as Record<string, unknown>) || {},
+      createdAt: r.createdAt.toISOString(),
+    }));
+  } catch (error) {
+    handlePersistenceFailure('getSecurityAuditLogs', error);
+    return fallbackStore.securityAuditLogs.slice(0, safeLimit);
+  }
+}
+
+/**
+ * Mission 001 + 001.6 (AUD-003, AUD-008, AUD-009): Persistent Webhook Delivery Idempotency
+ */
+export async function recordWebhookDeliveryIfNew(params: {
+  provider: 'github' | 'slack';
+  deliveryId: string;
+  eventType: string;
+}): Promise<{ isNew: boolean }> {
+  const compositeKey = `${params.provider}:${params.deliveryId.trim()}`;
+  try {
+    const inserted = await db
+      .insert(webhookDeliveries)
+      .values({
+        provider: params.provider,
+        deliveryId: compositeKey,
+        eventType: params.eventType,
+        status: 'processed',
+      })
+      .onConflictDoNothing({ target: webhookDeliveries.deliveryId })
+      .returning({ id: webhookDeliveries.id });
+
+    return { isNew: inserted.length > 0 };
+  } catch (error) {
+    handlePersistenceFailure('recordWebhookDeliveryIfNew', error);
+    if (fallbackStore.webhookDeliveries.has(compositeKey)) {
+      return { isNew: false };
+    }
+    fallbackStore.webhookDeliveries.add(compositeKey);
+    return { isNew: true };
+  }
+}
+
+/**
+ * Mission 001.6 (AUD-004 & AUD-010): Distributed Single-Use OAuth State &
+ * Per-User Encrypted External Connector Connections
+ */
+export interface OAuthStateRecord {
+  stateHash: string;
+  provider: string;
+  actorUid: string;
+  actorRole: RbacRole;
+  bindingHash: string;
+  codeVerifierEnc: string;
+  targetOrigin: string;
+  redirectUri: string;
+  createdAt: Date;
+  expiresAt: Date;
+  consumedAt: Date | null;
+}
+
+export interface ConsumedOAuthState extends OAuthStateRecord {
+  codeVerifier: string;
+}
+
+export async function createOAuthState(params: {
+  stateHash: string;
+  provider: 'github';
+  actorUid: string;
+  actorRole: RbacRole;
+  bindingHash: string;
+  codeVerifier: string;
+  targetOrigin: string;
+  redirectUri: string;
+  expiresAt: Date;
+}): Promise<void> {
+  const codeVerifierEnc = encryptSecret(
+    params.codeVerifier,
+    `oauth_state:${params.stateHash}`
+  );
+  const now = new Date();
+
+  try {
+    // Bounded opportunistic cleanup of expired OAuth states
+    await db.delete(oauthStates).where(lt(oauthStates.expiresAt, now));
+    await db.insert(oauthStates).values({
+      stateHash: params.stateHash,
+      provider: params.provider,
+      actorUid: params.actorUid,
+      actorRole: params.actorRole,
+      bindingHash: params.bindingHash,
+      codeVerifierEnc,
+      targetOrigin: params.targetOrigin,
+      redirectUri: params.redirectUri,
+      expiresAt: params.expiresAt,
+      consumedAt: null,
+    });
+  } catch (error) {
+    handlePersistenceFailure('createOAuthState', error);
+    // Clean expired fallback entries
+    for (const [k, v] of fallbackStore.oauthStates.entries()) {
+      if (v.expiresAt <= now) {
+        fallbackStore.oauthStates.delete(k);
+      }
+    }
+    fallbackStore.oauthStates.set(params.stateHash, {
+      stateHash: params.stateHash,
+      provider: params.provider,
+      actorUid: params.actorUid,
+      actorRole: params.actorRole,
+      bindingHash: params.bindingHash,
+      codeVerifierEnc,
+      targetOrigin: params.targetOrigin,
+      redirectUri: params.redirectUri,
+      createdAt: now,
+      expiresAt: params.expiresAt,
+      consumedAt: null,
+    });
+  }
+}
+
+/**
+ * Atomic single-use OAuth state consumption across concurrent requests and replicas.
+ * SQL UPDATE ... WHERE state_hash = $1 AND consumed_at IS NULL AND expires_at > NOW() RETURNING *
+ * guarantees at most ONE callback invocation can ever consume a state.
+ */
+export async function consumeOAuthStateAtomic(
+  stateHash: string
+): Promise<ConsumedOAuthState | null> {
+  const now = new Date();
+  try {
+    const updated = await db
+      .update(oauthStates)
+      .set({ consumedAt: now })
+      .where(
+        and(
+          eq(oauthStates.stateHash, stateHash),
+          isNull(oauthStates.consumedAt),
+          gt(oauthStates.expiresAt, now)
+        )
+      )
+      .returning();
+
+    const row = updated[0];
+    if (!row) return null;
+
+    const codeVerifier = decryptSecret(
+      row.codeVerifierEnc,
+      `oauth_state:${row.stateHash}`
+    );
+
+    return {
+      stateHash: row.stateHash,
+      provider: row.provider,
+      actorUid: row.actorUid,
+      actorRole: normalizeRbacRole(row.actorRole),
+      bindingHash: row.bindingHash,
+      codeVerifierEnc: row.codeVerifierEnc,
+      codeVerifier,
+      targetOrigin: row.targetOrigin,
+      redirectUri: row.redirectUri,
+      createdAt: row.createdAt,
+      expiresAt: row.expiresAt,
+      consumedAt: row.consumedAt,
+    };
+  } catch (error) {
+    handlePersistenceFailure('consumeOAuthStateAtomic', error);
+    const existing = fallbackStore.oauthStates.get(stateHash);
+    if (!existing || existing.consumedAt !== null || existing.expiresAt <= now) {
+      return null;
+    }
+    existing.consumedAt = now;
+    const codeVerifier = decryptSecret(
+      existing.codeVerifierEnc,
+      `oauth_state:${existing.stateHash}`
+    );
+    return { ...existing, codeVerifier };
+  }
+}
+
+export interface StoredConnectorConnectionRecord {
+  userUid: string;
+  provider: 'github' | 'gdrive';
+  externalUsername: string;
+  encryptedAccessToken: string;
+  encryptedRefreshToken: string | null;
+  tokenExpiresAt: Date | null;
+  status: 'connected' | 'revoked' | 'error';
+  lastError: string | null;
+  connectedAt: Date;
+  updatedAt: Date;
+}
+
+export interface UserConnectorConnection {
+  userUid: string;
+  provider: 'github' | 'gdrive';
+  externalUsername: string;
+  accessToken: string;
+  refreshToken: string | null;
+  tokenExpiresAt: Date | null;
+  status: 'connected' | 'revoked' | 'error';
+  connectedAt: string;
+}
+
+export async function upsertUserConnectorConnection(params: {
+  userUid: string;
+  provider: 'github' | 'gdrive';
+  externalUsername: string;
+  accessToken: string;
+  refreshToken?: string | null;
+  tokenExpiresAt?: Date | null;
+  status?: 'connected' | 'revoked' | 'error';
+}): Promise<void> {
+  const aad = `${params.userUid}:${params.provider}`;
+  const encryptedAccessToken = encryptSecret(params.accessToken, aad);
+  const encryptedRefreshToken = params.refreshToken
+    ? encryptSecret(params.refreshToken, aad)
+    : null;
+  const now = new Date();
+  const status = params.status ?? 'connected';
+
+  try {
+    await db
+      .insert(userConnectorConnections)
+      .values({
+        userUid: params.userUid,
+        provider: params.provider,
+        externalUsername: params.externalUsername,
+        encryptedAccessToken,
+        encryptedRefreshToken,
+        tokenExpiresAt: params.tokenExpiresAt ?? null,
+        status,
+        lastError: null,
+        connectedAt: now,
+        updatedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: [
+          userConnectorConnections.userUid,
+          userConnectorConnections.provider,
+        ],
+        set: {
+          externalUsername: params.externalUsername,
+          encryptedAccessToken,
+          encryptedRefreshToken,
+          tokenExpiresAt: params.tokenExpiresAt ?? null,
+          status,
+          lastError: null,
+          connectedAt: now,
+          updatedAt: now,
+        },
+      });
+  } catch (error) {
+    handlePersistenceFailure('upsertUserConnectorConnection', error);
+    fallbackStore.userConnectorConnections.set(aad, {
+      userUid: params.userUid,
+      provider: params.provider,
+      externalUsername: params.externalUsername,
+      encryptedAccessToken,
+      encryptedRefreshToken,
+      tokenExpiresAt: params.tokenExpiresAt ?? null,
+      status,
+      lastError: null,
+      connectedAt: now,
+      updatedAt: now,
+    });
+  }
+}
+
+export async function getUserConnectorConnection(
+  userUid: string,
+  provider: 'github' | 'gdrive'
+): Promise<UserConnectorConnection | null> {
+  const aad = `${userUid}:${provider}`;
+  try {
+    const rows = await db
+      .select()
+      .from(userConnectorConnections)
+      .where(
+        and(
+          eq(userConnectorConnections.userUid, userUid),
+          eq(userConnectorConnections.provider, provider),
+          eq(userConnectorConnections.status, 'connected')
+        )
+      )
+      .limit(1);
+
+    const row = rows[0];
+    if (!row) return null;
+
+    const accessToken = decryptSecret(row.encryptedAccessToken, aad);
+    const refreshToken = row.encryptedRefreshToken
+      ? decryptSecret(row.encryptedRefreshToken, aad)
+      : null;
+
+    return {
+      userUid: row.userUid,
+      provider,
+      externalUsername: row.externalUsername,
+      accessToken,
+      refreshToken,
+      tokenExpiresAt: row.tokenExpiresAt,
+      status: row.status as 'connected' | 'revoked' | 'error',
+      connectedAt: row.connectedAt.toISOString(),
+    };
+  } catch (error) {
+    handlePersistenceFailure('getUserConnectorConnection', error);
+    const stored = fallbackStore.userConnectorConnections.get(aad);
+    if (!stored || stored.status !== 'connected') return null;
+    return {
+      userUid: stored.userUid,
+      provider,
+      externalUsername: stored.externalUsername,
+      accessToken: decryptSecret(stored.encryptedAccessToken, aad),
+      refreshToken: stored.encryptedRefreshToken
+        ? decryptSecret(stored.encryptedRefreshToken, aad)
+        : null,
+      tokenExpiresAt: stored.tokenExpiresAt,
+      status: stored.status,
+      connectedAt: stored.connectedAt.toISOString(),
+    };
+  }
+}
+
+export async function revokeUserConnectorConnection(
+  userUid: string,
+  provider: 'github' | 'gdrive'
+): Promise<{ revoked: boolean }> {
+  const aad = `${userUid}:${provider}`;
+  try {
+    const deleted = await db
+      .delete(userConnectorConnections)
+      .where(
+        and(
+          eq(userConnectorConnections.userUid, userUid),
+          eq(userConnectorConnections.provider, provider)
+        )
+      )
+      .returning({ id: userConnectorConnections.id });
+    return { revoked: deleted.length > 0 };
+  } catch (error) {
+    handlePersistenceFailure('revokeUserConnectorConnection', error);
+    const existed = fallbackStore.userConnectorConnections.delete(aad);
+    return { revoked: existed };
+  }
+}
+
 

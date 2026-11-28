@@ -1,111 +1,83 @@
 import { expect, test } from '@playwright/test';
 
-test.describe('Hippocampus Enterprise AI Onboarding Mentor — Phase 1-3 E2E Suite', () => {
-  test('1. Landing Page & Interactive RAG Preview renders and switches workspace views', async ({
+test.describe('Hippocampus Enterprise AI — Hardened Security & UI E2E Suite', () => {
+  test('1. Landing Page renders, transitions to Workspace Console, and enforces unauthenticated sign-in gate', async ({
     page,
   }) => {
     await page.goto('/');
     await expect(
       page.getByRole('heading', {
-        name: /Zero-friction engineering onboarding/i,
+        name: /Turn scattered engineering runbooks into an instant Slack mentor/i,
       })
     ).toBeVisible();
 
     // Open Workspace Console
     await page
-      .getByRole('button', { name: /Launch Workspace Console/i })
+      .getByRole('button', { name: /Open Knowledge Console/i })
       .first()
       .click();
 
     await expect(
       page.getByRole('heading', { name: 'Overview Dashboard' })
     ).toBeVisible();
+
+    // Unauthenticated users must see Sign-In gate and must NOT have client role switcher buttons
+    await expect(
+      page.getByText(/Protected workspace APIs require verified Firebase authentication/i)
+    ).toBeVisible();
+    await expect(
+      page.getByRole('group', { name: 'RBAC Role Switcher' })
+    ).toHaveCount(0);
   });
 
-  test('2. Phase 3 RBAC Enforcement: Role Switcher filters documents and blocks unauthorized deletion', async ({
-    page,
+  test('2. Mission 001 Security Boundary: Forged x-hippocampus-role headers are rejected with 401 on protected APIs', async ({
     request,
   }) => {
-    // Verify API-level RBAC document filtering
-    const adminDocsRes = await request.get('/api/documents', {
+    const docsAttempt = await request.get('/api/documents', {
       headers: { 'x-hippocampus-role': 'Admin' },
     });
-    expect(adminDocsRes.ok()).toBeTruthy();
-    const adminDocsData = await adminDocsRes.json();
+    expect(docsAttempt.status()).toBe(401);
 
-    const engineerDocsRes = await request.get('/api/documents', {
-      headers: { 'x-hippocampus-role': 'Engineer' },
-    });
-    expect(engineerDocsRes.ok()).toBeTruthy();
-    const engineerDocsData = await engineerDocsRes.json();
-
-    // Engineer should see strictly fewer documents than Admin (Admin/Manager tiers redacted)
-    expect(adminDocsData.documents.length).toBeGreaterThan(
-      engineerDocsData.documents.length
-    );
-
-    // Engineer attempting to delete a document must receive 403 Forbidden
     const deleteAttempt = await request.delete('/api/documents/1', {
-      headers: { 'x-hippocampus-role': 'Engineer' },
+      headers: { 'x-hippocampus-role': 'Admin' },
     });
-    expect(deleteAttempt.status()).toBe(403);
+    expect(deleteAttempt.status()).toBe(401);
 
-    // UI Role Switcher test
-    await page.goto('/');
-    await page
-      .getByRole('button', { name: /Launch Workspace Console/i })
-      .first()
-      .click();
-
-    const roleGroup = page.getByRole('group', { name: 'RBAC Role Switcher' });
-    await expect(roleGroup).toBeVisible();
-    await roleGroup.getByRole('button', { name: 'Engineer' }).click();
-
-    await page.getByRole('button', { name: 'Knowledge Sources' }).click();
-    await expect(
-      page.getByText(/Engineer visibility \(Engineer tier only\)/i)
-    ).toBeVisible();
-  });
-
-  test('3. Phase 2 Hybrid RAG Playground & Agentic Tool Calling executes and cites sources', async ({
-    request,
-  }) => {
-    const chatRes = await request.post('/api/chat', {
+    const roleMutationAttempt = await request.patch('/api/auth/role', {
       headers: {
         'Content-Type': 'application/json',
         'x-hippocampus-role': 'Admin',
       },
-      data: {
-        query:
-          'Check Jira ticket ENG-1042 and explain how to fix ERR_SAML_SIGNATURE_SKEW',
-        channel: 'Playground',
-        bypassCache: true,
-        searchMode: 'hybrid_rrf',
-      },
+      data: { targetUid: 'uid-target', role: 'Admin' },
     });
-
-    expect(chatRes.ok()).toBeTruthy();
-    const body = await chatRes.json();
-    expect(body.searchMode).toBe('hybrid_rrf');
-    expect(Array.isArray(body.chunks)).toBeTruthy();
-    expect(body.chunks.length).toBeGreaterThan(0);
-    expect(Array.isArray(body.toolCalls)).toBeTruthy();
-    expect(body.toolCalls.length).toBeGreaterThan(0);
-    expect(body.toolCalls[0].toolName).toBe('fetchJiraTicket');
+    expect(roleMutationAttempt.status()).toBe(401);
   });
 
-  test('4. Phase 1 Slack Webhook Fail-Safe & Retry Deduplication returns immediate 200 OK', async ({
+  test('3. Mission 001 Security Boundary: GitHub & Slack webhooks fail closed and reject simulator header bypass', async ({
     request,
   }) => {
-    const duplicateRetryRes = await request.post('/api/slack/events', {
+    const githubBypassAttempt = await request.post('/api/webhooks/github', {
       headers: {
         'Content-Type': 'application/json',
         'x-hippocampus-simulator': 'true',
-        'x-slack-retry-num': '2',
+        'x-github-event': 'push',
+      },
+      data: {
+        ref: 'refs/heads/main',
+        repository: { full_name: 'Uchiha7madara-afk/Hippocampus_AI' },
+      },
+    });
+    // Must reject with 401 (invalid/missing signature) or 503 (secret unconfigured) — NEVER 200
+    expect([401, 503]).toContain(githubBypassAttempt.status());
+
+    const slackBypassAttempt = await request.post('/api/slack/events', {
+      headers: {
+        'Content-Type': 'application/json',
+        'x-hippocampus-simulator': 'true',
       },
       data: {
         type: 'event_callback',
-        event_id: 'Ev_E2E_RETRY_TEST',
+        event_id: 'Ev_E2E_BYPASS_TEST',
         event: {
           type: 'app_mention',
           channel: '#eng-onboarding',
@@ -114,10 +86,15 @@ test.describe('Hippocampus Enterprise AI Onboarding Mentor — Phase 1-3 E2E Sui
         },
       },
     });
+    expect([401, 503]).toContain(slackBypassAttempt.status());
+  });
 
-    expect(duplicateRetryRes.status()).toBe(200);
-    const body = await duplicateRetryRes.json();
-    expect(body.ok).toBe(true);
-    expect(body.status).toBe('duplicate_retry_suppressed');
+  test('4. Public health endpoint responds 200 OK without exposing sensitive internals', async ({
+    request,
+  }) => {
+    const healthRes = await request.get('/api/health');
+    expect(healthRes.status()).toBe(200);
+    const body = await healthRes.json();
+    expect(body.status).toBe('ok');
   });
 });

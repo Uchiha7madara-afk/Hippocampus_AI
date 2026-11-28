@@ -42,8 +42,100 @@ const tokenTotals = {
   agentToolCalls: 2,
 };
 
+const SENSITIVE_KEY_PATTERN =
+  /(token|secret|password|passwd|api[_-]?key|authorization|cookie|private[_-]?key|signature|credential|raw[_-]?body|rawbody|verifier|encryption[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|content|answer|queryembedding|query[_-]?preview|query[_-]?text)/i;
+
+const TOKEN_VALUE_PATTERN =
+  /(Bearer\s+[A-Za-z0-9\-._~+/]+=*|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z\-_]{20,}|sk-[A-Za-z0-9]{20,}|v0=[a-f0-9]{64}|sha256=[a-f0-9]{64}|-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----)/gi;
+
+const SAFE_REQUEST_ID_PATTERN = /^[A-Za-z0-9._-]{4,64}$/;
+
+export function sanitizeRequestId(raw?: string | string[]): string {
+  const candidate = Array.isArray(raw) ? raw[0] : raw;
+  if (candidate && SAFE_REQUEST_ID_PATTERN.test(candidate)) {
+    return candidate;
+  }
+  return randomUUID().slice(0, 12);
+}
+
+export function sanitizeStringForLogs(value: string): string {
+  return value.replace(TOKEN_VALUE_PATTERN, '[REDACTED]');
+}
+
+export function sanitizeAuditMetadata(
+  input?: Record<string, unknown> | null,
+  depth = 0
+): Record<string, unknown> {
+  if (!input || typeof input !== 'object' || depth > 4) {
+    return {};
+  }
+  const safe: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(input)) {
+    if (SENSITIVE_KEY_PATTERN.test(key)) {
+      safe[key] = '[REDACTED]';
+      continue;
+    }
+    if (typeof value === 'string') {
+      safe[key] = sanitizeStringForLogs(value).slice(0, 300);
+    } else if (
+      typeof value === 'number' ||
+      typeof value === 'boolean' ||
+      value === null
+    ) {
+      safe[key] = value;
+    } else if (Array.isArray(value)) {
+      safe[key] = value.slice(0, 20).map((item) =>
+        typeof item === 'string'
+          ? sanitizeStringForLogs(item).slice(0, 120)
+          : typeof item === 'number' || typeof item === 'boolean'
+            ? item
+            : '[OBJECT]'
+      );
+    } else if (typeof value === 'object') {
+      safe[key] = sanitizeAuditMetadata(
+        value as Record<string, unknown>,
+        depth + 1
+      );
+    }
+  }
+  return safe;
+}
+
 export const pinoLogger = pino({
   level: process.env.LOG_LEVEL || 'info',
+  redact: {
+    paths: [
+      'authorization',
+      'token',
+      'idToken',
+      'accessToken',
+      'refreshToken',
+      'githubToken',
+      'secret',
+      'webhookSecret',
+      'clientSecret',
+      'password',
+      'apiKey',
+      'privateKey',
+      'cookie',
+      'codeVerifier',
+      '*.authorization',
+      '*.token',
+      '*.idToken',
+      '*.accessToken',
+      '*.refreshToken',
+      '*.githubToken',
+      '*.secret',
+      '*.webhookSecret',
+      '*.clientSecret',
+      '*.password',
+      '*.apiKey',
+      '*.privateKey',
+      '*.cookie',
+      '*.codeVerifier',
+    ],
+    censor: '[REDACTED]',
+  },
   base: {
     service: 'hippocampus-enterprise',
     env: process.env.NODE_ENV || 'development',
@@ -54,10 +146,15 @@ export const pinoLogger = pino({
 export function emitStructuredLog(
   entry: Omit<StructuredLogEntry, 'id' | 'timestamp'>
 ): StructuredLogEntry {
+  const sanitizedMetadata = entry.metadata
+    ? sanitizeAuditMetadata(entry.metadata)
+    : undefined;
   const fullEntry: StructuredLogEntry = {
     id: randomUUID(),
     timestamp: new Date().toISOString(),
     ...entry,
+    message: sanitizeStringForLogs(entry.message),
+    metadata: sanitizedMetadata,
   };
 
   logRingBuffer.unshift(fullEntry);
@@ -75,7 +172,7 @@ export function emitStructuredLog(
     completionTokens: fullEntry.completionTokens,
     totalTokens: fullEntry.totalTokens,
     statusCode: fullEntry.statusCode,
-    ...(fullEntry.metadata || {}),
+    ...(sanitizedMetadata || {}),
   };
 
   if (fullEntry.level === 'error') {
@@ -123,14 +220,20 @@ export function recordAgentToolCall(params: {
   requestId?: string;
 }) {
   tokenTotals.agentToolCalls += 1;
+  const sanitizedArgs = sanitizeAuditMetadata(params.args || {});
+  const argKeys = Object.keys(params.args || {});
   emitStructuredLog({
     level: 'info',
     component: 'tools',
     event: `tool.invoke.${params.toolName}`,
     requestId: params.requestId,
     latencyMs: params.durationMs,
-    metadata: { toolName: params.toolName, args: params.args },
-    message: `Agentic Function Call executed: ${params.toolName}(${JSON.stringify(params.args)}) in ${params.durationMs}ms`,
+    metadata: {
+      toolName: params.toolName,
+      argKeys,
+      args: sanitizedArgs,
+    },
+    message: `Agentic Function Call executed: ${params.toolName} (keys=${argKeys.join(',') || 'none'}) in ${params.durationMs}ms`,
   });
 }
 
@@ -152,7 +255,7 @@ export function recordCacheEvent(
     cacheHit: hit,
     metadata: {
       similarity: similarity ? Number((similarity * 100).toFixed(1)) : undefined,
-      queryPreview: query?.slice(0, 60),
+      queryLength: query ? query.length : 0,
     },
     message: hit
       ? `Semantic cache HIT (${((similarity ?? 1) * 100).toFixed(1)}% match) — 0 LLM tokens consumed`
@@ -225,8 +328,7 @@ export function requestLoggerMiddleware(
     return next();
   }
 
-  const requestId =
-    (req.headers['x-request-id'] as string) || randomUUID().slice(0, 12);
+  const requestId = sanitizeRequestId(req.headers['x-request-id']);
   req.requestId = requestId;
   res.setHeader('X-Request-Id', requestId);
 

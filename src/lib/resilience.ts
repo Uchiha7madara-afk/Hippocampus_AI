@@ -18,6 +18,7 @@ const DEFAULT_LIMITS: Record<string, RateLimitConfig> = {
   chat: { windowMs: 60_000, maxRequests: 25, scope: 'rag_chat' },
   documents: { windowMs: 60_000, maxRequests: 15, scope: 'doc_ingest' },
   slack: { windowMs: 60_000, maxRequests: 40, scope: 'slack_webhook' },
+  github: { windowMs: 60_000, maxRequests: 60, scope: 'github_webhook' },
 };
 
 let lastRateLimitSnapshot = {
@@ -112,15 +113,15 @@ export function checkSlidingWindowLimit(
 }
 
 export function createRateLimitMiddleware(
-  scopeKey: 'chat' | 'documents' | 'slack'
+  scopeKey: 'chat' | 'documents' | 'slack' | 'github'
 ) {
   const config = DEFAULT_LIMITS[scopeKey];
 
   return async (req: TelemetryRequest, res: Response, next: NextFunction) => {
+    // Mission 001.6 (AUD-012): Never trust raw X-Forwarded-For headers directly.
+    // Express `req.ip` is governed strictly by the server's explicit `trust proxy` hop count.
     const clientIp =
-      (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ||
-      req.ip ||
-      'workspace-client';
+      req.ip || req.socket?.remoteAddress || 'workspace-client';
 
     const upstashResult = await checkUpstashRateLimit(
       `${ config.scope }:${ clientIp }`,
@@ -181,23 +182,20 @@ export function getRateLimitStatus() {
   return { ...lastRateLimitSnapshot };
 }
 
+export function resetSlackEventDedupeCacheForTesting() {
+  slackProcessedEventIds.clear();
+}
+
 /**
- * Deduplicates Slack webhook retries (x-slack-retry-num or duplicate event_id within 10 minutes)
- * so Slack timeout retries never trigger duplicate Gemini RAG threads.
+ * In-process L1 deduplication by event_id ONLY (never suppresses solely because x-slack-retry-num > 0,
+ * since legitimate retries occur when the first delivery timed out or failed before reaching our server).
  */
-export function isDuplicateSlackEvent(
-  eventId?: string,
-  retryNumHeader?: string | null
-): boolean {
+export function isDuplicateSlackEvent(eventId?: string): boolean {
   const now = Date.now();
   for (const [id, ts] of slackProcessedEventIds.entries()) {
     if (now - ts > 10 * 60_000) {
       slackProcessedEventIds.delete(id);
     }
-  }
-
-  if (retryNumHeader && parseInt(retryNumHeader, 10) > 0) {
-    return true;
   }
 
   if (eventId) {

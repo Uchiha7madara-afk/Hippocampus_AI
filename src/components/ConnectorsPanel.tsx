@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   CheckCircle2,
   ExternalLink,
@@ -250,21 +250,44 @@ export function ConnectorsPanel({
   const [loadingDriveFiles, setLoadingDriveFiles] = useState(false);
   const [importingDocId, setImportingDocId] = useState<string | null>(null);
 
+  const [disconnectingGithub, setDisconnectingGithub] = useState(false);
+  const oauthPopupRef = useRef<Window | null>(null);
+
   const [banner, setBanner] = useState<{
     type: 'success' | 'error' | 'info';
     text: string;
   } | null>(null);
 
-  // Listen for GitHub OAuth popup postMessage completion
+  // Listen for GitHub OAuth popup postMessage completion (AUD-010: strict origin, popup source, and payload shape)
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
-      if (event.data?.type === 'GITHUB_OAUTH_SUCCESS') {
-        setBanner({
-          type: 'success',
-          text: `GitHub OAuth session connected (${event.data.username || '@github-user'}). Ready for repository ingestion.`,
-        });
-        onRefreshAll();
+      if (event.origin !== window.location.origin) {
+        return;
       }
+      if (!oauthPopupRef.current || event.source !== oauthPopupRef.current) {
+        return;
+      }
+      const data = event.data;
+      if (
+        !data ||
+        typeof data !== 'object' ||
+        (data as { type?: unknown }).type !== 'GITHUB_OAUTH_SUCCESS'
+      ) {
+        return;
+      }
+      const rawUsername = (data as { username?: unknown }).username;
+      if (
+        typeof rawUsername !== 'string' ||
+        !/^@[A-Za-z0-9._-]{1,64}$/.test(rawUsername)
+      ) {
+        return;
+      }
+      oauthPopupRef.current = null;
+      setBanner({
+        type: 'success',
+        text: `GitHub OAuth session connected (${rawUsername}). Ready for repository ingestion.`,
+      });
+      onRefreshAll();
     };
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
@@ -318,10 +341,13 @@ export function ConnectorsPanel({
         'width=600,height=700'
       );
       if (!authWindow) {
+        oauthPopupRef.current = null;
         setBanner({
           type: 'error',
           text: 'Popup blocked by browser. Please allow popups for this site to complete GitHub OAuth.',
         });
+      } else {
+        oauthPopupRef.current = authWindow;
       }
     } catch (err) {
       setBanner({
@@ -331,6 +357,35 @@ export function ConnectorsPanel({
             ? err.message
             : 'Failed to initiate GitHub OAuth flow.',
       });
+    }
+  };
+
+  const handleDisconnectGithubOAuth = async () => {
+    setDisconnectingGithub(true);
+    setBanner(null);
+    try {
+      const res = await authFetch('/api/connectors/github/disconnect', {
+        method: 'POST',
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to disconnect GitHub OAuth.');
+      }
+      setBanner({
+        type: 'info',
+        text: 'Your personal GitHub OAuth connection has been revoked.',
+      });
+      await onRefreshAll();
+    } catch (err) {
+      setBanner({
+        type: 'error',
+        text:
+          err instanceof Error
+            ? err.message
+            : 'Failed to disconnect GitHub OAuth.',
+      });
+    } finally {
+      setDisconnectingGithub(false);
     }
   };
 
@@ -382,12 +437,10 @@ export function ConnectorsPanel({
     setBanner(null);
     try {
       const simulatedSha = Math.random().toString(16).slice(2, 9);
-      const res = await authFetch('/api/webhooks/github', {
+      const res = await authFetch('/api/dev/webhooks/github/simulate', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-hippocampus-simulator': 'true',
-          'x-github-event': 'push',
         },
         body: JSON.stringify({
           ref: webhookBranchOption,
@@ -419,18 +472,18 @@ export function ConnectorsPanel({
       });
       const data = await res.json();
       if (!res.ok) {
-        throw new Error(data.error || 'Webhook dispatch failed.');
+        throw new Error(data.error || 'Webhook simulation failed.');
       }
 
       if (data.status === 'skipped_non_main_branch') {
         setBanner({
           type: 'info',
-          text: `Webhook listener verified event on ${data.ref} and skipped indexing (configured to only auto-ingest refs/heads/main).`,
+          text: `[Simulated Dry-Run] Webhook simulator verified event on ${data.ref} and skipped indexing (only refs/heads/main is indexed).`,
         });
       } else {
         setBanner({
           type: 'success',
-          text: `Processed push webhook (${data.commitSha}) on ${data.ref}: re-chunked & upserted ${data.chunksUpserted} vector chunks.`,
+          text: `[Simulated Dry-Run] Validated push payload (${data.commitSha}) on ${data.ref}: previewed ${data.chunksUpserted} vector chunk(s) without mutating production data.`,
         });
       }
       await onRefreshAll();
@@ -632,18 +685,30 @@ export function ConnectorsPanel({
                   </p>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={handleOpenGithubOAuthPopup}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:border-emerald-500/50 hover:text-emerald-300 cursor-pointer"
-                >
-                  <FolderGit2 className="h-3.5 w-3.5 text-emerald-400" />
-                  <span>
-                    {connectors?.githubSessionConnected
-                      ? 'Reconnect GitHub OAuth'
-                      : 'Connect GitHub OAuth'}
-                  </span>
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleOpenGithubOAuthPopup}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:border-emerald-500/50 hover:text-emerald-300 cursor-pointer"
+                  >
+                    <FolderGit2 className="h-3.5 w-3.5 text-emerald-400" />
+                    <span>
+                      {connectors?.githubSessionConnected
+                        ? 'Reconnect GitHub OAuth'
+                        : 'Connect GitHub OAuth'}
+                    </span>
+                  </button>
+                  {connectors?.githubSessionConnected && (
+                    <button
+                      type="button"
+                      disabled={disconnectingGithub}
+                      onClick={handleDisconnectGithubOAuth}
+                      className="inline-flex items-center gap-1 rounded-lg border border-red-500/40 bg-red-500/10 px-2.5 py-1.5 text-xs font-medium text-red-300 hover:bg-red-500/20 disabled:opacity-50 cursor-pointer"
+                    >
+                      {disconnectingGithub ? 'Revoking...' : 'Disconnect'}
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
 

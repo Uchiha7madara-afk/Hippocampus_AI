@@ -11,8 +11,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  lint-and-typecheck:
-    name: TypeScript & Zod Schema Verification
+  lint-typecheck-and-security:
+    name: TypeScript, Build, Security Suite & RAG Benchmark
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -29,6 +29,12 @@ jobs:
       - name: Run TypeScript Strict Typecheck (tsc --noEmit)
         run: npm run lint
 
+      - name: Verify Drizzle Migration Snapshots (drizzle-kit check)
+        run: npx drizzle-kit check --config=src/db/drizzle.config.ts
+
+      - name: Run Mission 001.6 Adversarial Security & PostgreSQL Integration Suites
+        run: npm run test:security
+
       - name: Verify Production Vite Bundle Build
         run: npm run build
 
@@ -38,7 +44,7 @@ jobs:
   drizzle-migration-dry-run:
     name: Drizzle ORM & pgvector Migration Dry-Run
     runs-on: ubuntu-latest
-    needs: lint-and-typecheck
+    needs: lint-typecheck-and-security
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -81,7 +87,7 @@ jobs:
         run: npx drizzle-kit push --config=src/db/drizzle.config.ts --force
 
   playwright-e2e:
-    name: Playwright E2E (Auth, RBAC & Hybrid RAG Flows)
+    name: Playwright E2E (Hardened Auth, RBAC & Webhook Boundaries)
     runs-on: ubuntu-latest
     needs: drizzle-migration-dry-run
     services:
@@ -108,7 +114,7 @@ jobs:
       SQL_ADMIN_PASSWORD: postgres_ci_password
       SQL_USER: postgres
       SQL_PASSWORD: postgres_ci_password
-      DEFAULT_RBAC_ROLE: Admin
+      DEFAULT_RBAC_ROLE: Engineer
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4

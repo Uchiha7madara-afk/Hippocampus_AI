@@ -126,13 +126,19 @@ export interface StructuredLogItem {
   message: string;
 }
 
+export interface SemanticCacheSummary {
+  totalEntries: number;
+  totalHits: number;
+  byRole: Record<string, number>;
+}
+
 export interface SemanticCacheEntry {
   id: number;
-  queryText: string;
-  answer: string;
-  sources: string[];
+  cacheKeyPrefix: string;
+  requiredRole: RbacRole;
+  searchMode: string;
   confidence: number;
-  toolCalls?: AgentToolInvocation[];
+  sourceCount: number;
   hitCount: number;
   createdAt: string;
   lastHitAt: string;
@@ -174,6 +180,7 @@ export interface TelemetryPayload {
     resetEpochSeconds: number;
     throttledRequests: number;
   };
+  cacheSummary?: SemanticCacheSummary;
   cacheEntries: SemanticCacheEntry[];
   envReport?: EnvValidationReport;
   rbacPolicy?: {
@@ -211,6 +218,7 @@ export interface UserMilestoneProgress {
 }
 
 export interface EngineerCohortSummary {
+  userUid?: string;
   userHandle: string;
   displayName: string;
   engineerRole: string;
@@ -228,6 +236,7 @@ export interface EngineerCohortSummary {
 }
 
 export interface OnboardingPayload {
+  activeUserUid?: string;
   activeUserHandle: string;
   activeRole: RbacRole;
   tracks: OnboardingTrackItem[];

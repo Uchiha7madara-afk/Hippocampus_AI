@@ -187,11 +187,14 @@ export function TelemetryDrawer({
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h3 className="font-display text-sm font-semibold text-white">
-                  Semantic Vector Cache ({telemetry?.cacheEntries.length ?? 0}{' '}
+                  Semantic Vector Cache (
+                  {telemetry?.cacheSummary?.totalEntries ??
+                    telemetry?.cacheEntries.length ??
+                    0}{' '}
                   active entries)
                 </h3>
                 <p className="text-xs text-slate-400">
-                  Role-namespaced queries with &ge;94% cosine similarity bypass Gemini and return in &lt;20ms.
+                  Role-isolated cache metadata (answers, prompts, and source titles redacted from telemetry).
                 </p>
               </div>
               <div className="flex items-center gap-2">
@@ -218,6 +221,19 @@ export function TelemetryDrawer({
               </div>
             </div>
 
+            {telemetry?.cacheSummary && (
+              <div className="flex flex-wrap items-center gap-3 font-mono text-[11px] text-slate-400">
+                <span>Total hits: {telemetry.cacheSummary.totalHits}</span>
+                {Object.entries(telemetry.cacheSummary.byRole).map(
+                  ([tier, count]) => (
+                    <span key={tier}>
+                      · {tier}: {count}
+                    </span>
+                  )
+                )}
+              </div>
+            )}
+
             {telemetry?.cacheEntries && telemetry.cacheEntries.length > 0 ? (
               <div className="divide-y divide-slate-800 rounded-lg border border-slate-800 bg-slate-950">
                 {telemetry.cacheEntries.slice(0, 5).map((entry) => (
@@ -226,11 +242,13 @@ export function TelemetryDrawer({
                     className="flex items-center justify-between gap-4 px-3.5 py-2.5 text-xs"
                   >
                     <div className="min-w-0">
-                      <p className="truncate font-medium text-white">
-                        {entry.queryText}
+                      <p className="truncate font-mono font-medium text-white">
+                        key:{entry.cacheKeyPrefix} · {entry.requiredRole} ·{' '}
+                        {entry.searchMode}
                       </p>
                       <p className="truncate text-[11px] text-slate-400">
-                        Sources: {entry.sources.join(' · ') || 'None'}
+                        {entry.sourceCount} cited source(s) · confidence{' '}
+                        {entry.confidence}%
                       </p>
                     </div>
                     <span className="font-mono text-emerald-400 tabular-nums shrink-0">
@@ -241,7 +259,9 @@ export function TelemetryDrawer({
               </div>
             ) : (
               <p className="text-xs text-slate-400">
-                No queries cached yet. Run a query in the RAG Playground or Slack Simulator to populate L1/L2 cache.
+                {telemetry?.rbacPolicy?.activeRole === 'Manager'
+                  ? 'Per-entry cache records are restricted to Admin role. Aggregate counts are displayed above.'
+                  : 'No queries cached yet. Run a query in the RAG Playground to populate the role-scoped cache.'}
               </p>
             )}
           </div>

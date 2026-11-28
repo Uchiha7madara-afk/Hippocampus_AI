@@ -97,13 +97,10 @@ const TAB_TITLES: Record<WorkspaceTab, { title: string; subtitle: string }> = {
   },
 };
 
-const RBAC_ROLES: RbacRole[] = ['Admin', 'Manager', 'Engineer'];
-
 function HippocampusShell() {
   const {
     user,
     activeRole,
-    setActiveRole,
     googleAccessToken,
     signInWithGoogle,
     connectGoogleWorkspace,
@@ -200,12 +197,12 @@ function HippocampusShell() {
   }, [authFetch]);
 
   useEffect(() => {
-    refreshWorkspaceData();
-  }, [refreshWorkspaceData, activeRole]);
-
-  const handleRoleSwitch = async (nextRole: RbacRole) => {
-    await setActiveRole(nextRole);
-  };
+    if (user) {
+      refreshWorkspaceData();
+    } else {
+      setLoadingData(false);
+    }
+  }, [refreshWorkspaceData, activeRole, user]);
 
   const handleEnterWorkspace = (initialTab: WorkspaceTab = 'dashboard') => {
     setActiveTab(initialTab);
@@ -220,6 +217,7 @@ function HippocampusShell() {
   };
 
   const handleToggleOnboardingMilestone = async (params: {
+    targetUid?: string;
     userHandle: string;
     trackId: number;
     completed: boolean;
@@ -326,14 +324,13 @@ function HippocampusShell() {
   }) => {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
-      'x-hippocampus-simulator': 'true',
     };
     if (payload.simulateRetryHeader) {
       headers['x-slack-retry-num'] = '2';
       headers['x-slack-retry-reason'] = 'http_timeout';
     }
 
-    const res = await authFetch('/api/slack/events', {
+    const res = await authFetch('/api/dev/slack/events/simulate', {
       method: 'POST',
       headers,
       body: JSON.stringify({
@@ -542,29 +539,16 @@ function HippocampusShell() {
               ))}
             </select>
 
-            {/* Phase 3 RBAC Role Switcher */}
+            {/* Server-Verified RBAC Role Badge (read-only; enforced strictly by backend DB) */}
             <div
-              className="hidden sm:inline-flex items-center rounded-lg border border-slate-800 bg-slate-900 p-1"
-              role="group"
-              aria-label="RBAC Role Switcher"
+              className="hidden sm:inline-flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900 px-3 py-1.5 text-xs"
+              aria-label="Verified RBAC Role"
             >
-              {RBAC_ROLES.map((roleOption) => {
-                const isCurrent = activeRole === roleOption;
-                return (
-                  <button
-                    key={roleOption}
-                    type="button"
-                    onClick={() => handleRoleSwitch(roleOption)}
-                    className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                      isCurrent
-                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                        : 'text-slate-400 hover:text-white'
-                    }`}
-                  >
-                    {roleOption}
-                  </button>
-                );
-              })}
+              <Shield className="h-3.5 w-3.5 text-emerald-400" />
+              <span className="text-slate-400">Role:</span>
+              <span className="font-mono font-semibold text-emerald-300">
+                {user ? activeRole : 'Unauthenticated'}
+              </span>
             </div>
 
             <button
@@ -607,6 +591,22 @@ function HippocampusShell() {
               {currentHeader.subtitle}
             </p>
           </div>
+
+          {!user && (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-xs text-emerald-200">
+              <span>
+                Protected workspace APIs require verified Firebase authentication. Sign in to load your RBAC-scoped knowledge base and onboarding track.
+              </span>
+              <button
+                type="button"
+                onClick={signInWithGoogle}
+                className="inline-flex items-center gap-1.5 rounded-md bg-white px-3 py-1.5 font-semibold text-slate-950 hover:bg-slate-200 cursor-pointer"
+              >
+                <LogIn className="h-3.5 w-3.5" />
+                Sign In with Google
+              </button>
+            </div>
+          )}
 
           {(apiError || authError) && (
             <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs text-amber-300">

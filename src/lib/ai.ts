@@ -705,7 +705,13 @@ export async function synthesizeRagAnswer(
 
       if (fnCalls && fnCalls.length > 0) {
         const previousContent = response1.candidates?.[0]?.content;
-        const functionResponseParts = [];
+        const functionResponseParts: Array<{
+          functionResponse: {
+            id?: string;
+            name: string;
+            response: Record<string, unknown>;
+          };
+        }> = [];
 
         for (const call of fnCalls) {
           const toolName = call.name || 'fetchJiraTicket';

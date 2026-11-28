@@ -10,7 +10,7 @@ import {
   onAuthStateChanged,
   signInWithPopup,
   signOut,
-  User,
+  type User,
 } from 'firebase/auth';
 import { auth, googleAuthProvider } from '../lib/firebase.ts';
 import type { RbacRole } from '../types/app.ts';
@@ -24,7 +24,6 @@ interface AuthContextValue {
   idToken: string | null;
   googleAccessToken: string | null;
   activeRole: RbacRole;
-  setActiveRole: (role: RbacRole) => Promise<void>;
   loading: boolean;
   authError: string | null;
   signInWithGoogle: () => Promise<void>;
@@ -41,9 +40,34 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [googleAccessToken, setGoogleAccessToken] = useState<string | null>(
     cachedWorkspaceAccessToken
   );
-  const [activeRole, setActiveRoleState] = useState<RbacRole>('Admin');
+  // Least-privilege initial UI state; authoritative role always comes from server DB via /api/auth/sync
+  const [activeRole, setActiveRoleState] = useState<RbacRole>('Engineer');
   const [loading, setLoading] = useState(true);
   const [authError, setAuthError] = useState<string | null>(null);
+
+  const syncVerifiedUser = useCallback(async (firebaseUser: User) => {
+    const token = await firebaseUser.getIdToken();
+    setIdToken(token);
+    const res = await fetch('/api/auth/sync', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+    });
+    if (res.ok) {
+      const data = (await res.json()) as {
+        user?: { role?: RbacRole };
+      };
+      if (
+        data.user?.role === 'Admin' ||
+        data.user?.role === 'Manager' ||
+        data.user?.role === 'Engineer'
+      ) {
+        setActiveRoleState(data.user.role);
+      }
+    }
+  }, []);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
@@ -57,32 +81,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
 
         try {
-          const token = await firebaseUser.getIdToken();
-          setIdToken(token);
-          const res = await fetch('/api/auth/sync', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${token}`,
-            },
-          });
-          if (res.ok) {
-            const data = (await res.json()) as {
-              user?: { role?: RbacRole };
-            };
-            if (
-              data.user?.role === 'Admin' ||
-              data.user?.role === 'Manager' ||
-              data.user?.role === 'Engineer'
-            ) {
-              setActiveRoleState(data.user.role);
-            }
-          }
+          await syncVerifiedUser(firebaseUser);
         } catch (err) {
           console.warn('Token sync warning:', err);
         }
       } else {
         setIdToken(null);
+        setActiveRoleState('Engineer');
         cachedWorkspaceAccessToken = null;
         setGoogleAccessToken(null);
       }
@@ -90,7 +95,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
 
     return () => unsubscribe();
-  }, []);
+  }, [syncVerifiedUser]);
 
   const signInWithGoogle = useCallback(async () => {
     setAuthError(null);
@@ -102,15 +107,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         cachedWorkspaceAccessToken = credential.accessToken;
         setGoogleAccessToken(credential.accessToken);
       }
-      const token = await result.user.getIdToken();
-      setIdToken(token);
-      await fetch('/api/auth/sync', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-      });
+      await syncVerifiedUser(result.user);
     } catch (err: unknown) {
       const msg =
         err instanceof Error ? err.message : 'Google Sign-In failed.';
@@ -118,7 +115,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } finally {
       isSigningInFlow = false;
     }
-  }, []);
+  }, [syncVerifiedUser]);
 
   const connectGoogleWorkspace = useCallback(async (): Promise<
     string | null
@@ -135,8 +132,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
       cachedWorkspaceAccessToken = credential.accessToken;
       setGoogleAccessToken(credential.accessToken);
-      const token = await result.user.getIdToken();
-      setIdToken(token);
+      await syncVerifiedUser(result.user);
       return credential.accessToken;
     } catch (err: unknown) {
       const msg =
@@ -148,12 +144,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } finally {
       isSigningInFlow = false;
     }
-  }, []);
+  }, [syncVerifiedUser]);
 
   const logout = useCallback(async () => {
     setAuthError(null);
     await signOut(auth);
     setIdToken(null);
+    setActiveRoleState('Engineer');
     cachedWorkspaceAccessToken = null;
     setGoogleAccessToken(null);
   }, []);
@@ -164,9 +161,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (!headers.has('Content-Type') && options.body) {
         headers.set('Content-Type', 'application/json');
       }
-      if (!headers.has('x-hippocampus-role')) {
-        headers.set('x-hippocampus-role', activeRole);
-      }
+      // Mission 001: Never send client-controlled role headers (x-hippocampus-role removed)
       if (
         cachedWorkspaceAccessToken &&
         !headers.has('x-google-access-token')
@@ -191,27 +186,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         headers,
       });
     },
-    [user, idToken, activeRole]
-  );
-
-  const setActiveRole = useCallback(
-    async (nextRole: RbacRole) => {
-      setActiveRoleState(nextRole);
-      try {
-        await fetch('/api/auth/role', {
-          method: 'PATCH',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-hippocampus-role': nextRole,
-            ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
-          },
-          body: JSON.stringify({ role: nextRole }),
-        });
-      } catch {
-        // Non-blocking role sync
-      }
-    },
-    [idToken]
+    [user, idToken]
   );
 
   return (
@@ -221,7 +196,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         idToken,
         googleAccessToken,
         activeRole,
-        setActiveRole,
         loading,
         authError,
         signInWithGoogle,
